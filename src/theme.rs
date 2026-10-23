@@ -11,8 +11,9 @@ use serde::Deserialize;
 /// The theme used when the settings name none, or one that isn't built in.
 pub const DEFAULT: &str = "mocha";
 
-/// The built-in themes by name, lightest Catppuccin flavor first.
-pub const BUILT_IN: [(&str, &str); 9] = [
+/// The built-in themes by name, lightest Catppuccin flavor first; last,
+/// the one in the terminal's own colors.
+pub const BUILT_IN: [(&str, &str); 10] = [
     ("latte", include_str!("../themes/latte.toml")),
     ("frappe", include_str!("../themes/frappe.toml")),
     ("macchiato", include_str!("../themes/macchiato.toml")),
@@ -22,6 +23,7 @@ pub const BUILT_IN: [(&str, &str); 9] = [
     ("gruvbox", include_str!("../themes/gruvbox.toml")),
     ("nord", include_str!("../themes/nord.toml")),
     ("rose-pine", include_str!("../themes/rose-pine.toml")),
+    ("terminal", include_str!("../themes/terminal.toml")),
 ];
 
 #[derive(Deserialize)]
@@ -65,6 +67,32 @@ pub struct Colors {
     pub tag: Color,
 }
 
+/// A palette color: `"#rrggbb"`, or one of the terminal's own: `default`
+/// (its background or text color, where it's used) or an ANSI color's name.
+fn color(s: &str) -> Option<Color> {
+    let ansi = match s {
+        "default" => Color::Reset,
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "white" => Color::Gray,
+        "bright-black" => Color::DarkGray,
+        "bright-red" => Color::LightRed,
+        "bright-green" => Color::LightGreen,
+        "bright-yellow" => Color::LightYellow,
+        "bright-blue" => Color::LightBlue,
+        "bright-magenta" => Color::LightMagenta,
+        "bright-cyan" => Color::LightCyan,
+        "bright-white" => Color::White,
+        _ => return hex(s),
+    };
+    Some(ansi)
+}
+
 fn hex(s: &str) -> Option<Color> {
     let s = s.strip_prefix('#')?;
     if s.len() != 6 {
@@ -88,7 +116,7 @@ impl Colors {
 
     fn parse(text: &str) -> Option<Self> {
         let file: ThemeFile = toml::from_str(text).ok()?;
-        let p = |name: &str| file.palette.get(name).and_then(|c| hex(c));
+        let p = |name: &str| file.palette.get(name).and_then(|c| color(c));
         Some(Self {
             name: file.name.unwrap_or_default(),
             bg: p("bg")?,

@@ -232,7 +232,7 @@ certificate = "/Users/you/Documents/bridge/cert.pem"
 Everything else is in `settings.toml` in [your data folder](#your-data). Every line is optional; changes made by hand take effect the next time tuimail starts:
 
 ```toml
-theme = "mocha"          # latte, frappe, macchiato, mocha, tokyonight, dracula, gruvbox, nord, rose-pine
+theme = "mocha"          # latte, frappe, macchiato, mocha, tokyonight, dracula, gruvbox, nord, rose-pine, or terminal (your terminal's own colors)
 icons = "auto"           # auto (Nerd Font icons in Ghostty, kitty and WezTerm), nerd or plain
 notifications = "auto"   # auto (what your terminal understands), off, bell, osc9, osc777 or osc99
 preview = true           # the open message beside the list, when the window is wide enough

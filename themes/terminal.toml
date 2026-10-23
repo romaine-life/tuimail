@@ -1,0 +1,24 @@
+# The terminal's own colors: its background, its text color and its sixteen
+# ANSI colors, so the terminal's color scheme is what tuimail shows.
+
+name = "Terminal"
+
+# What tuimail paints with each. Colors are the terminal's: "default" (its
+# background, or its text color) or an ANSI color's name.
+[palette]
+bg = "default"           # the background
+bg_alt = "default"       # popups, the search box, the composer's fields
+surface = "blue"         # the selected row
+overlay = "bright-black" # borders of what doesn't have the keys
+comment = "bright-black" # key hints, read mail, placeholders
+subtext = "white"        # senders of read mail, dates, headers' names
+fg = "default"           # subjects and text
+red = "red"              # errors
+orange = "yellow"        # flagged mail
+yellow = "bright-yellow" # warnings
+green = "green"          # what worked
+cyan = "cyan"            # quoted text in a message
+blue = "bright-blue"     # links
+purple = "magenta"       # quoted text, one level deeper
+pink = "bright-magenta"  # tags
+accent = "bright-cyan"   # what has the keys: the cursor, unread mail, popups
