@@ -55,14 +55,26 @@ jobs:
         shell: bash
         env:
           XWIN_ARCH: aarch64
-          # ring 0.17.14 selects GNU clang for Windows ARM64. Use xwin's
-          # matching GNU flags/sysroot instead of clang-cl's /imsvc flags.
-          XWIN_CROSS_COMPILER: clang
-          XWIN_MSVC_SYSROOT_DOWNLOAD_URL: https://github.com/trcrsired/windows-msvc-sysroot/releases/download/2026-09-15/windows-msvc-sysroot.tar.xz
+          XWIN_CROSS_COMPILER: clang-cl
           RUSTFLAGS: -C target-feature=+crt-static
         run: |
           set -euo pipefail
-          cargo xwin build --release --locked --target aarch64-pc-windows-msvc
+          # Prepare the complete Microsoft CRT/SDK, including Windows.h.
+          # Export its linker/library environment, then use GNU clang for ring.
+          xwin_exports=$(cargo xwin env --target aarch64-pc-windows-msvc)
+          eval "$xwin_exports"
+          # xwin's env command prints removed variables as empty exports.
+          # Cargo must use the target RUSTFLAGS, including static CRT and -L.
+          unset RUSTFLAGS
+          export TARGET_CC=clang
+          export CC_aarch64_pc_windows_msvc=clang
+          export TARGET_CXX=clang++
+          export CXX_aarch64_pc_windows_msvc=clang++
+          export CFLAGS_aarch64_pc_windows_msvc="${CFLAGS_aarch64_pc_windows_msvc//\/imsvc/-isystem} -fms-runtime-lib=static"
+          export CXXFLAGS_aarch64_pc_windows_msvc="${CXXFLAGS_aarch64_pc_windows_msvc//\/imsvc/-isystem}"
+          export CXXFLAGS_aarch64_pc_windows_msvc="${CXXFLAGS_aarch64_pc_windows_msvc//\/EHsc/-fexceptions -fcxx-exceptions} -fms-runtime-lib=static"
+          clang --version
+          cargo build --release --locked --target aarch64-pc-windows-msvc
       - name: Format, lints and offline tests
         shell: bash
         run: |
