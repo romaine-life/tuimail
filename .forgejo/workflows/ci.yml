@@ -43,7 +43,10 @@ jobs:
           set -euo pipefail
           # This is a disposable job container, not the Windows runner host.
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y clang lld llvm python3-venv
+          # LLVM 18's ARM64 __prefetch builtin conflicts with the MSVC CRT.
+          # LLVM 19 has the const-correct declaration required by intrin.h.
+          sudo apt-get install --no-install-recommends -y clang-19 lld-19 llvm-19 python3-venv
+          echo /usr/lib/llvm-19/bin >> "$GITHUB_PATH"
           python3 -m venv "$RUNNER_TEMP/tuimail-cross"
           "$RUNNER_TEMP/tuimail-cross/bin/python" -m pip install --only-binary=:all: \
             cargo-xwin==0.23.1 cargo-zigbuild==0.24.0 ziglang==0.17.0
