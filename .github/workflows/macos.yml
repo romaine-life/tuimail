@@ -32,7 +32,12 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
+      - name: Test native Mac release build
+        shell: bash
+        run: |
+          set -euo pipefail
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          cargo test --release --locked --target "$host"
       - name: Build and package both Mac targets
         shell: bash
         run: |
