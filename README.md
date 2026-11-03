@@ -7,8 +7,7 @@
 A terminal email client (TUI): IMAP and POP3 to read, SMTP to send, several accounts side by side.<br>
 Arrow keys or vim keys. Passwords in your system's keychain. Nothing loaded from the internet when you read.
 
-[![Release](https://img.shields.io/github/v/release/erictran308/tuimail)](https://github.com/erictran308/tuimail/releases/latest)
-[![crates.io](https://img.shields.io/crates/v/tuimail.svg)](https://crates.io/crates/tuimail)
+[Releases on Forgejo](https://forgejo.romaine.life/romaine-life/tuimail/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org)
 
@@ -21,6 +20,8 @@ Arrow keys or vim keys. Passwords in your system's keychain. Nothing loaded from
 </div>
 
 ---
+
+This is Nelson's fork of [erictran308/tuimail](https://github.com/erictran308/tuimail), with a `terminal` theme that uses the terminal's own background, text and ANSI colors. Its source and releases live on [Forgejo](https://forgejo.romaine.life/romaine-life/tuimail); GitHub mirrors the source and builds the Mac archives.
 
 ## Why tuimail
 
@@ -42,41 +43,64 @@ Arrow keys or vim keys. Passwords in your system's keychain. Nothing loaded from
 
 ## Get started
 
-**1. Install tuimail.** If you have Rust and [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), that's one command, on any system:
+**1. Install tuimail.** Forgejo requires authentication for release downloads, including this public repository. These commands use the Forgejo credential already stored for Git and download the compiled release.
 
-```sh
-cargo binstall tuimail
+On macOS or Linux, choose your archive from the table below and run this in Bash. It puts `tuimail` in `~/.local/bin`; the authentication header reaches curl through stdin:
+
+```bash
+(
+  set -euo pipefail
+  set +x
+  asset=tuimail-aarch64-apple-darwin.tar.gz
+  forgejo_token=$(printf 'protocol=https\nhost=forgejo.romaine.life\n\n' |
+    git credential fill | sed -n 's/^password=//p')
+  [ -n "$forgejo_token" ] || { printf 'No stored Forgejo credential found.\n' >&2; exit 1; }
+  mkdir -p "$HOME/.local/bin"
+  printf 'Authorization: token %s\n' "$forgejo_token" |
+    curl --fail --silent --show-error --location --header @- \
+      "https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/$asset" |
+    tar xz -C "$HOME/.local/bin" tuimail
+)
 ```
 
-Otherwise, on macOS or Linux, paste this into a terminal. It puts `tuimail` in `~/.local/bin`:
+On Windows, choose the ZIP name for your architecture and run this in PowerShell. It installs into `%LOCALAPPDATA%\Programs\tuimail`; the token stays in an in-process header:
 
-```sh
-mkdir -p ~/.local/bin
-curl -fsSL https://github.com/erictran308/tuimail/releases/latest/download/tuimail-aarch64-apple-darwin.tar.gz | tar xz -C ~/.local/bin tuimail
+```powershell
+$ErrorActionPreference = 'Stop'
+$asset = 'tuimail-x86_64-pc-windows-msvc.zip'
+$passwordLine = @("protocol=https`nhost=forgejo.romaine.life`n`n" |
+  git credential fill | Where-Object { $_ -like 'password=*' })[0]
+if (-not $passwordLine) { throw 'No stored Forgejo credential found' }
+$headers = @{ Authorization = 'token ' + $passwordLine.Substring(9) }
+$archive = Join-Path ([IO.Path]::GetTempPath()) ("tuimail-$([guid]::NewGuid().ToString('N')).zip")
+$installDir = Join-Path $env:LOCALAPPDATA 'Programs\tuimail'
+try {
+  Invoke-WebRequest -Headers $headers -OutFile $archive -Uri "https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/$asset"
+  Expand-Archive -LiteralPath $archive -DestinationPath $installDir -Force
+} finally {
+  if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive }
+  $headers.Clear()
+  $passwordLine = $null
+}
+& (Join-Path $installDir 'tuimail.exe') --version
 ```
 
-Swap the file name for your computer's:
+Set `asset` to the file for your computer. You can also sign into Forgejo in your browser and download it through these links:
 
 | Computer | File |
 | --- | --- |
-| Mac with Apple silicon (M1 or later) | [`tuimail-aarch64-apple-darwin.tar.gz`](https://github.com/erictran308/tuimail/releases/latest/download/tuimail-aarch64-apple-darwin.tar.gz) |
-| Mac with Intel | [`tuimail-x86_64-apple-darwin.tar.gz`](https://github.com/erictran308/tuimail/releases/latest/download/tuimail-x86_64-apple-darwin.tar.gz) |
-| Linux, x86_64 | [`tuimail-x86_64-unknown-linux-gnu.tar.gz`](https://github.com/erictran308/tuimail/releases/latest/download/tuimail-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux, ARM64 | [`tuimail-aarch64-unknown-linux-gnu.tar.gz`](https://github.com/erictran308/tuimail/releases/latest/download/tuimail-aarch64-unknown-linux-gnu.tar.gz) |
-| Windows, x86_64 | [`tuimail-x86_64-pc-windows-msvc.zip`](https://github.com/erictran308/tuimail/releases/latest/download/tuimail-x86_64-pc-windows-msvc.zip) |
-| Windows, ARM64 | [`tuimail-aarch64-pc-windows-msvc.zip`](https://github.com/erictran308/tuimail/releases/latest/download/tuimail-aarch64-pc-windows-msvc.zip) |
+| Mac with Apple silicon (M1 or later) | [`tuimail-aarch64-apple-darwin.tar.gz`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-aarch64-apple-darwin.tar.gz) |
+| Mac with Intel | [`tuimail-x86_64-apple-darwin.tar.gz`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-x86_64-apple-darwin.tar.gz) |
+| Linux, x86_64 | [`tuimail-x86_64-unknown-linux-gnu.tar.gz`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux, ARM64 | [`tuimail-aarch64-unknown-linux-gnu.tar.gz`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-aarch64-unknown-linux-gnu.tar.gz) |
+| Windows, x86_64 | [`tuimail-x86_64-pc-windows-msvc.zip`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-x86_64-pc-windows-msvc.zip) |
+| Windows, ARM64 | [`tuimail-aarch64-pc-windows-msvc.zip`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-aarch64-pc-windows-msvc.zip) |
 
-- **Windows:** download the `.zip`, unzip it, and run `tuimail.exe` from Windows Terminal.
-- **Linux:** needs glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36, RHEL 9 or later.
+- **Windows:** add `%LOCALAPPDATA%\Programs\tuimail` to your `PATH`, or run `tuimail.exe` there from Windows Terminal. A browser download can instead be unzipped into a folder of your choice.
+- **Linux:** needs glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36 or later.
 - **macOS:** if you downloaded the file in a browser instead, macOS blocks the app. Run `xattr -d com.apple.quarantine tuimail` once to allow it.
 
-If `tuimail` isn't found afterwards, add `~/.local/bin` to your `PATH`. Each file comes with a signed record of the commit it was built from; to check one, run `gh attestation verify <file> --repo erictran308/tuimail --signer-workflow erictran308/tuimail/.github/workflows/release.yml`.
-
-**Or build it from source** (Rust 1.90 or newer, and a C compiler for SQLite):
-
-```sh
-cargo install tuimail --locked
-```
+If `tuimail` isn't found afterwards, add `~/.local/bin` to your `PATH`. The Forgejo release includes `SHA256SUMS` for all six archives and links the successful Mac build for its source commit. Compare a downloaded archive's SHA-256 checksum with its matching line in that file. Windows executables carry the at-terminal Authenticode signature; the release archives do not claim GitHub provenance attestations.
 
 **2. Run it.**
 

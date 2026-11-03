@@ -1,0 +1,57 @@
+name: macOS
+
+# GitHub is the Mac builder for Forgejo. Every branch push is intentional:
+# before mirror cutover a temporary branch carries the exact Forgejo commit.
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - name: Build and package both Mac targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked --target "$target"
+            if [ "$target" = "$host" ]; then
+              "target/$target/release/tuimail" --version
+              help=$("target/$target/release/tuimail" --help)
+              grep -q 'IMAP and POP3' <<< "$help"
+            fi
+            mkdir -p "dist/$target"
+            cp "target/$target/release/tuimail" README.md LICENSE SECURITY.md "dist/$target/"
+            tar czf "tuimail-$target.tar.gz" -C "dist/$target" tuimail README.md LICENSE SECURITY.md
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tuimail-macos
+          path: tuimail-*-apple-darwin.tar.gz
+          if-no-files-found: error
+          retention-days: 14
