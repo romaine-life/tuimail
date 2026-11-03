@@ -1,10 +1,10 @@
 [package]
 name = "tuimail"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "Email in your terminal: a vim-style IMAP, POP3 and SMTP client"
 license = "MIT"
-repository = "https://github.com/erictran308/tuimail"
+repository = "https://forgejo.romaine.life/romaine-life/tuimail"
 readme = "README.md"
 rust-version = "1.90"
 keywords = ["email", "imap", "tui", "terminal", "vim"]
@@ -15,9 +15,9 @@ include = ["src/**/*.rs", "themes/*.toml", "README.md", "LICENSE", "SECURITY.md"
 name = "tuimail"
 path = "src/main.rs"
 
-# `cargo binstall tuimail` takes the binary from the GitHub release, built by
-# .github/workflows/release.yml; without one for the computer, it builds from
-# source. QuickInstall's binaries, which aren't built here, are never used.
+# Release asset URLs for installers that supply Forgejo authentication.
+# README.md has authenticated download commands. QuickInstall binaries,
+# which are not built here, are never used.
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/tuimail-{ target }.tar.gz"
 pkg-fmt = "tgz"

@@ -1,0 +1,409 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "4"
+
+jobs:
+  linux:
+    name: Linux
+    # These are existing labels on the i9's container runner. Keep the three
+    # cross-builds together instead of queuing them on the small NAS runner.
+    runs-on: [ubuntu-latest, upstairspc-linux]
+    timeout-minutes: 90
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,aarch64-pc-windows-msvc
+      - name: Format, lints and offline tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+      - name: Advisories
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/cargo-audit-v0.22.2.tgz"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz \
+            --output "$archive"
+          printf '%s  %s\n' 7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428 "$archive" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/cargo-audit"
+          tar xzf "$archive" --strip-components=1 -C "$RUNNER_TEMP/cargo-audit"
+          "$RUNNER_TEMP/cargo-audit/cargo-audit" audit
+      - name: Install job-local cross-build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This is a disposable job container, not the Windows runner host.
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang lld llvm python3-venv
+          python3 -m venv "$RUNNER_TEMP/tuimail-cross"
+          "$RUNNER_TEMP/tuimail-cross/bin/python" -m pip install --only-binary=:all: \
+            cargo-xwin==0.23.1 cargo-zigbuild==0.24.0 ziglang==0.17.0
+          echo "$RUNNER_TEMP/tuimail-cross/bin" >> "$GITHUB_PATH"
+          echo "CARGO_ZIGBUILD_PYTHON_PATH=$RUNNER_TEMP/tuimail-cross/bin/python" >> "$GITHUB_ENV"
+          echo "CARGO_ZIGBUILD_CACHE_DIR=$RUNNER_TEMP/zigbuild-cache" >> "$GITHUB_ENV"
+          echo "XWIN_CACHE_DIR=$RUNNER_TEMP/xwin" >> "$GITHUB_ENV"
+      - name: Build Linux x64 and ARM64 with glibc 2.35
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            cargo zigbuild --release --locked --target "$target.2.35"
+            bin="target/$target/release/tuimail"
+            glibc=$(readelf --version-info "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)
+            glibc=${glibc#GLIBC_}
+            test -n "$glibc"
+            echo "$target requires glibc $glibc"
+            test "$(printf '%s\n' 2.35 "$glibc" | sort -V | tail -1)" = 2.35
+            if [ "$target" = x86_64-unknown-linux-gnu ]; then
+              "$bin" --version
+              help=$("$bin" --help)
+              grep -q 'IMAP and POP3' <<< "$help"
+            fi
+            mkdir -p "dist/$target"
+            cp "$bin" README.md LICENSE SECURITY.md "dist/$target/"
+            tar czf "tuimail-$target.tar.gz" -C "dist/$target" tuimail README.md LICENSE SECURITY.md
+          done
+      - name: Cross-build Windows ARM64
+        shell: bash
+        env:
+          XWIN_ARCH: aarch64
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          set -euo pipefail
+          cargo xwin build --release --locked --target aarch64-pc-windows-msvc
+      - uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: tuimail-linux
+          path: tuimail-*-unknown-linux-gnu.tar.gz
+          if-no-files-found: error
+      - uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: tuimail-windows-arm64
+          path: target/aarch64-pc-windows-msvc/release/tuimail.exe
+          if-no-files-found: error
+
+  windows:
+    name: Windows
+    needs: linux
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # Installed on upstairspc. Do not change the shared host's toolchain.
+      RUSTUP_TOOLCHAIN: stable
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - name: Format, lints and offline tests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustc --version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo fmt --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build and smoke-test Windows x64
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release --locked --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & target/x86_64-pc-windows-msvc/release/tuimail.exe --version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $help = & target/x86_64-pc-windows-msvc/release/tuimail.exe --help
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if (($help -join "`n") -notmatch 'IMAP and POP3') { throw 'Missing expected help text' }
+      - uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        with:
+          name: tuimail-windows-arm64
+          path: windows-arm64
+      - name: Sign both Windows binaries and package
+        env:
+          PFX: ${{ secrets.AT_TERMINAL_PFX }}
+          PFX_PASSWORD: ${{ secrets.AT_TERMINAL_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:PFX) { throw 'AT_TERMINAL_PFX is not set' }
+          $bytes = [Convert]::FromBase64String($env:PFX)
+          $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            $bytes, $env:PFX_PASSWORD,
+            [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::UserKeySet)
+          try {
+            $binaries = [ordered]@{
+              'x86_64-pc-windows-msvc' = 'target/x86_64-pc-windows-msvc/release/tuimail.exe'
+              'aarch64-pc-windows-msvc' = 'windows-arm64/tuimail.exe'
+            }
+            foreach ($target in $binaries.Keys) {
+              $binary = (Resolve-Path -LiteralPath $binaries[$target]).Path
+              $signature = Set-AuthenticodeSignature -LiteralPath $binary -Certificate $certificate -HashAlgorithm SHA256
+              if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) {
+                throw "Signature verification failed for ${target}: $($signature.Status)"
+              }
+              $package = New-Item -ItemType Directory -Path "dist/$target" -Force
+              Copy-Item -LiteralPath $binary -Destination (Join-Path $package.FullName 'tuimail.exe')
+              Copy-Item -LiteralPath README.md, LICENSE, SECURITY.md -Destination $package.FullName
+              Compress-Archive -Path "$($package.FullName)/*" -DestinationPath "tuimail-$target.zip"
+            }
+          } finally {
+            $certificate.Dispose()
+            [Array]::Clear($bytes, 0, $bytes.Length)
+          }
+      - uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: tuimail-windows
+          path: tuimail-*-pc-windows-msvc.zip
+          if-no-files-found: error
+
+  macos:
+    name: macOS
+    runs-on: windows-latest
+    timeout-minutes: 70
+    outputs:
+      run-url: ${{ steps.github.outputs.run_url }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Wait for this commit's GitHub Mac build and download its archives
+        id: github
+        env:
+          GH_MIRROR_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:GH_MIRROR_TOKEN) { throw 'GH_MIRROR_TOKEN is not set' }
+          if ($env:SOURCE_SHA -notmatch '^[0-9a-f]{40}$') { throw 'Invalid source SHA' }
+          $repository = 'romaine-life/tuimail'
+          $api = "https://api.github.com/repos/$repository"
+          $handler = [Net.Http.HttpClientHandler]::new()
+          $handler.AllowAutoRedirect = $false
+          $client = [Net.Http.HttpClient]::new($handler)
+          $client.Timeout = [TimeSpan]::FromSeconds(45)
+          $client.DefaultRequestHeaders.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $env:GH_MIRROR_TOKEN)
+          $client.DefaultRequestHeaders.UserAgent.ParseAdd('tuimail-forgejo')
+          $client.DefaultRequestHeaders.Accept.ParseAdd('application/vnd.github+json')
+          $client.DefaultRequestHeaders.Add('X-GitHub-Api-Version', '2022-11-28')
+          $downloadHandler = [Net.Http.HttpClientHandler]::new()
+          $downloadHandler.AllowAutoRedirect = $false
+          # Deliberately separate: signed storage redirects never receive the token.
+          $downloadClient = [Net.Http.HttpClient]::new($downloadHandler)
+          $downloadClient.Timeout = [TimeSpan]::FromMinutes(5)
+          try {
+            $deadline = [DateTime]::UtcNow.AddMinutes(60)
+            $run = $null
+            while ([DateTime]::UtcNow -lt $deadline) {
+              $response = $client.GetAsync("$api/actions/workflows/macos.yml/runs?event=push&head_sha=$env:SOURCE_SHA&per_page=100").GetAwaiter().GetResult()
+              try {
+                $code = [int]$response.StatusCode
+                if ($code -eq 200) {
+                  $data = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json
+                  $run = @($data.workflow_runs | Where-Object { $_.head_sha -eq $env:SOURCE_SHA -and $_.event -eq 'push' } | Sort-Object id -Descending)[0]
+                  if ($run -and $run.status -eq 'completed') {
+                    if ($run.conclusion -ne 'success') { throw "GitHub Mac build failed ($($run.conclusion)): $($run.html_url)" }
+                    break
+                  }
+                  if ($run) { Write-Host "Waiting for $($run.html_url): $($run.status)" }
+                  else { Write-Host "Waiting for GitHub macos.yml on $env:SOURCE_SHA" }
+                } elseif ($code -eq 404 -or $code -in 500, 502, 503, 504) {
+                  Write-Host "Waiting for GitHub workflow availability (HTTP $code)"
+                } else { throw "GitHub workflow lookup returned HTTP $code" }
+              } finally { $response.Dispose() }
+              Start-Sleep -Seconds 15
+            }
+            if (-not $run -or $run.status -ne 'completed' -or $run.conclusion -ne 'success') {
+              throw "Timed out waiting for GitHub macos.yml on $env:SOURCE_SHA"
+            }
+            Write-Host "GitHub Mac build passed: $($run.html_url)"
+            "run_url=$($run.html_url)" | Add-Content $env:GITHUB_OUTPUT
+            # The weekly advisory run does not publish. Its unchanged source
+            # still needs a green Mac result, but old run artifacts may expire.
+            if ($env:GITHUB_EVENT_NAME -eq 'schedule') { exit 0 }
+            $response = $client.GetAsync("$api/actions/runs/$($run.id)/artifacts?per_page=100").GetAwaiter().GetResult()
+            try {
+              if ([int]$response.StatusCode -ne 200) { throw "GitHub artifact lookup returned HTTP $([int]$response.StatusCode)" }
+              $data = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json
+              $artifacts = @($data.artifacts | Where-Object { $_.name -eq 'tuimail-macos' -and -not $_.expired })
+              if ($artifacts.Count -ne 1 -or $artifacts[0].size_in_bytes -le 0 -or $artifacts[0].size_in_bytes -gt 256MB) {
+                throw 'Expected one non-expired tuimail-macos artifact under 256 MiB'
+              }
+            } finally { $response.Dispose() }
+            $response = $client.GetAsync("$api/actions/artifacts/$($artifacts[0].id)/zip").GetAwaiter().GetResult()
+            try {
+              if ([int]$response.StatusCode -ne 302) { throw "GitHub artifact download returned HTTP $([int]$response.StatusCode), expected a storage redirect" }
+              $url = $response.Headers.Location
+            } finally { $response.Dispose() }
+            $archive = Join-Path $env:RUNNER_TEMP 'tuimail-github-macos.zip'
+            if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive }
+            for ($redirect = 0; $redirect -lt 5; $redirect++) {
+              if (-not $url.IsAbsoluteUri -or $url.Scheme -ne 'https' -or $url.UserInfo -or
+                  $url.Host -notmatch '(^|\.)(blob\.core\.windows\.net|githubusercontent\.com)$') {
+                throw 'Unexpected GitHub artifact storage URL'
+              }
+              $response = $downloadClient.GetAsync($url, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+              try {
+                if ([int]$response.StatusCode -in 301, 302, 303, 307, 308) {
+                  $url = [Uri]::new($url, $response.Headers.Location)
+                  continue
+                }
+                if ([int]$response.StatusCode -ne 200) { throw "Artifact storage returned HTTP $([int]$response.StatusCode)" }
+                $file = [IO.File]::Create($archive)
+                try { $response.Content.CopyToAsync($file).GetAwaiter().GetResult() }
+                finally { $file.Dispose() }
+                break
+              } finally { $response.Dispose() }
+            }
+            if (-not (Test-Path -LiteralPath $archive) -or (Get-Item -LiteralPath $archive).Length -gt 256MB) {
+              throw 'Mac artifact was not downloaded or exceeds 256 MiB'
+            }
+            $expected = @('tuimail-aarch64-apple-darwin.tar.gz', 'tuimail-x86_64-apple-darwin.tar.gz')
+            $destination = New-Item -ItemType Directory -Path macos -Force
+            $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+            try {
+              if ($zip.Entries.Count -ne $expected.Count -or
+                  (Compare-Object ($expected | Sort-Object) (@($zip.Entries | ForEach-Object FullName) | Sort-Object))) {
+                throw 'Unexpected Mac artifact contents'
+              }
+              foreach ($entry in $zip.Entries) {
+                if ($entry.FullName -notin $expected -or $entry.Length -le 0 -or $entry.Length -gt 128MB) {
+                  throw 'Unexpected Mac archive path or size'
+                }
+                [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $destination.FullName $entry.FullName), $true)
+              }
+              foreach ($name in $expected) {
+                if (-not (Test-Path -LiteralPath (Join-Path $destination.FullName $name))) { throw "Missing $name" }
+              }
+            } finally { $zip.Dispose() }
+          } finally {
+            $client.Dispose()
+            $downloadClient.Dispose()
+          }
+      - uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        if: github.event_name != 'schedule'
+        with:
+          name: tuimail-macos
+          path: macos/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: [linux, windows, macos]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        with:
+          name: tuimail-linux
+          path: release
+      - uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        with:
+          name: tuimail-windows
+          path: release
+      - uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        with:
+          name: tuimail-macos
+          path: release
+      - name: Publish immutable Forgejo release
+        env:
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MACOS_RUN_URL: ${{ needs.macos.outputs.run-url }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = [regex]::Match((Get-Content -Raw -LiteralPath Cargo.toml), '(?ms)^\[package\]\r?\n.*?^version = "([^"]+)"').Groups[1].Value
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid Cargo package version' }
+          $tag = "v$version"
+          $expected = @(
+            'tuimail-x86_64-unknown-linux-gnu.tar.gz',
+            'tuimail-aarch64-unknown-linux-gnu.tar.gz',
+            'tuimail-aarch64-apple-darwin.tar.gz',
+            'tuimail-x86_64-apple-darwin.tar.gz',
+            'tuimail-x86_64-pc-windows-msvc.zip',
+            'tuimail-aarch64-pc-windows-msvc.zip'
+          )
+          $actual = @((Get-ChildItem -LiteralPath release -File).Name)
+          if (Compare-Object ($expected | Sort-Object) ($actual | Sort-Object)) { throw 'Release archive set does not match all six targets' }
+          $checksums = foreach ($name in ($expected | Sort-Object)) {
+            $hash = (Get-FileHash -LiteralPath "release/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+          }
+          [IO.File]::WriteAllText((Join-Path $PWD 'release/SHA256SUMS'), (($checksums -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
+          $api = "$env:GITHUB_SERVER_URL/api/v1/repos/$env:GITHUB_REPOSITORY"
+          $headers = @{ Authorization = "token $env:FORGEJO_TOKEN" }
+          $existing = Invoke-RestMethod "$api/releases/tags/$tag" -Headers $headers -SkipHttpErrorCheck -StatusCodeVariable releaseCode
+          if ($releaseCode -eq 200) {
+            $assetNames = @($existing.assets | ForEach-Object name)
+            if (-not $existing.draft -and -not (Compare-Object (($expected + 'SHA256SUMS') | Sort-Object) ($assetNames | Sort-Object)) -and
+                -not ($existing.assets | Where-Object { $_.size -le 0 })) {
+              Write-Host "$tag is already published; bump Cargo.toml and Cargo.lock to publish another version: $($existing.html_url)"
+              exit 0
+            }
+            throw "$tag already has an incomplete or draft release; refusing to overwrite it"
+          } elseif ($releaseCode -ne 404) { throw "Release lookup returned HTTP $releaseCode" }
+          $tagged = Invoke-RestMethod "$api/tags/$tag" -Headers $headers -SkipHttpErrorCheck -StatusCodeVariable tagCode
+          if ($tagCode -eq 404) {
+            Invoke-RestMethod -Method Post "$api/tags" -Headers $headers -ContentType 'application/json' -Body (@{
+              tag_name = $tag; target = $env:SOURCE_SHA
+            } | ConvertTo-Json) | Out-Null
+          } elseif ($tagCode -ne 200 -or $tagged.commit.sha -ne $env:SOURCE_SHA) {
+            throw "$tag is reserved for another commit or its lookup failed"
+          }
+          $notes = "Built from $env:SOURCE_SHA. Windows executables are signed with the at-terminal certificate. Mac checks and archives: $env:MACOS_RUN_URL"
+          $created = Invoke-RestMethod -Method Post "$api/releases" -Headers $headers -ContentType 'application/json' -Body (@{
+            tag_name = $tag; target_commitish = $env:SOURCE_SHA; name = $tag; body = $notes; draft = $true
+          } | ConvertTo-Json)
+          try {
+            foreach ($name in ($expected + 'SHA256SUMS')) {
+              Invoke-RestMethod -Method Post "$api/releases/$($created.id)/assets?name=$name" -Headers $headers -Form @{
+                attachment = Get-Item -LiteralPath "release/$name"
+              } | Out-Null
+            }
+            $published = Invoke-RestMethod -Method Patch "$api/releases/$($created.id)" -Headers $headers -ContentType 'application/json' -Body (@{ draft = $false } | ConvertTo-Json)
+            Write-Host "Published ${tag}: $($published.html_url)"
+          } catch {
+            # Only this run's still-draft release is removed. Its reserved tag
+            # remains at this SHA for a retry; published versions stay immutable.
+            $current = Invoke-RestMethod "$api/releases/$($created.id)" -Headers $headers
+            if ($current.draft) { Invoke-RestMethod -Method Delete "$api/releases/$($created.id)" -Headers $headers | Out-Null }
+            throw
+          }

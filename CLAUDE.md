@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 tuimail: a terminal email client for one person's own use: IMAP and POP3 to read, SMTP to send, several accounts, vim keys and arrow keys. Rust, ratatui, tokio, MIT. A sibling of tuigram (`../tuigram`, Telegram), tuimeta (`../tuimeta`) and tuitube (`../tuitube`, YouTube): same security posture, same themes (`themes/`), same `text::clean`, `config.rs` (data folder), `settings.rs` (`save_one`), notifications (`notify.rs`, from tuigram), paste handling and UI helpers (`ui::bordered`, `hint_spans`, `hints_fitting`, `fit`, the `?` popup with a Keys and a Settings tab, from tuitube).
 
-This is a personal fork of erictran308/tuimail (remote `upstream`, push disabled); push straight to `main`. Fork additions: the `terminal` theme (`themes/terminal.toml`), whose palette values may be `default` (`Color::Reset`) or an ANSI color's name (`theme::color`) as well as `#rrggbb`, so the terminal's own scheme shows through.
+This is a personal fork of erictran308/tuimail (remote `upstream`, push disabled), hosted at https://forgejo.romaine.life/romaine-life/tuimail. Work in a branch and merge through a Forgejo PR after its required checks pass. GitHub is a push mirror and the Mac builder. Fork additions: the `terminal` theme (`themes/terminal.toml`), whose palette values may be `default` (`Color::Reset`) or an ANSI color's name (`theme::color`) as well as `#rrggbb`, so the terminal's own scheme shows through.
 
 ## Running
 
@@ -25,7 +25,9 @@ cargo run -- --demo
 
 ## Releasing
 
-As tuitube: `.github/workflows/release.yml` builds six targets on a `v*` tag and makes the GitHub release (archives, `SHA256SUMS`, provenance attestation); `cargo binstall tuimail` takes those archives (`[package.metadata.binstall]`), so the release must be up before `cargo publish`. `ci.yml` runs fmt, clippy (`-D warnings`) and tests on Linux, macOS and Windows. Bump `version`, `cargo build`, tests, clippy, `cargo fmt --check`, `actionlint`; commit and push; `git tag -a vX.Y.Z --cleanup=whitespace -F <notes>`; push the tag; once `SHA256SUMS` is up, `cargo publish` then `cargo clean -p tuimail`.
+`.forgejo/workflows/ci.yml` runs fmt, clippy (`-D warnings`), offline tests and the advisory audit. Its Linux job cross-builds both Linux architectures with a glibc 2.35 floor and Windows ARM64. Its Windows job tests natively, builds x64, signs both Windows executables, and packages them. `.github/workflows/macos.yml` checks and builds both Mac architectures; Forgejo requires its successful GitHub push run on the exact source SHA and downloads that run's archives. Before push-mirror cutover, the migration operator pushes that exact SHA to a temporary GitHub branch to start the Mac run.
+
+Bump `version` in Cargo.toml and this package's entry in Cargo.lock, then open a Forgejo PR. After all checks pass, merging to `main` creates the matching `vX.Y.Z` Forgejo release with all six archives and `SHA256SUMS`. A manual CI run on `main` can retry publication; an already published version remains immutable. Later source changes without a version bump still run all checks but do not replace that release. Install with the authenticated release-download commands in README.md: Forgejo requires authentication even for public repository releases. Read the stored credential with `git credential fill`, pass it through curl's `--header @-` stdin or PowerShell's in-process headers, and never put the token on a command line. Cargo metadata points to Forgejo, but a local manifest alone does not authenticate cargo-binstall. This personal fork is not published to crates.io and does not claim GitHub provenance attestations for Forgejo builds. Never build on nelsonpc or fall back to a local Rust build when downloading fails; use the CI runners.
 
 ## Security
 
