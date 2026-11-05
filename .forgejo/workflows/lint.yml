@@ -1,0 +1,33 @@
+name: Lint
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RUSTUP_TOOLCHAIN: stable
+      CARGO_BUILD_JOBS: "4"
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Format and lints
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Kept on the runner: a new folder compiles every dependency again.
+          $env:CARGO_TARGET_DIR = "$env:USERPROFILE\.forgejo-runner\tuimail-lint"
+          cargo fmt --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

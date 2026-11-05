@@ -350,7 +350,7 @@ TM_DATA_DIR=$HOME/tm-test cargo run   # a separate data folder (a full path) for
 cargo run -- --demo              # made-up accounts and mail, nothing connects or is sent
 ```
 
-The tests against a real server run against [GreenMail](https://greenmail-mail-test.github.io/greenmail/) in Docker (IMAP, POP3 and SMTP over TLS); the commands are at the top of `src/live.rs`, and CI runs them on every change.
+The tests against a real server run against [GreenMail](https://greenmail-mail-test.github.io/greenmail/) in Docker (IMAP, POP3 and SMTP over TLS); the commands are at the top of `src/live.rs`, and the full CI build runs them.
 
 Only development builds read a `.env`, and only from the source folder, never the folder they're started from, and only its `TM_*` lines: an installed tuimail ignores it, so a `.env` in a folder you cloned can't change where your mail is kept.
 

@@ -1,11 +1,10 @@
 name: macOS
 
-# GitHub is the Mac builder for Forgejo. Every branch push is intentional:
-# before mirror cutover a temporary branch carries the exact Forgejo commit.
+# GitHub is the Mac builder for Forgejo's full build, which only a push to
+# `release` starts.
 on:
   push:
-    branches: ['**']
-  workflow_dispatch:
+    branches: [release]
 
 permissions:
   contents: read

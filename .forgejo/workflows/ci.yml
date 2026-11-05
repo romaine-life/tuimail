@@ -1,12 +1,9 @@
 name: CI
 
+# The full build. It runs only when Nelson says so, by pushing to `release`.
 on:
-  pull_request:
   push:
-    branches: [main]
-  workflow_dispatch:
-  schedule:
-    - cron: "17 6 * * 1"
+    branches: [release]
 
 permissions:
   contents: write
@@ -179,9 +176,7 @@ jobs:
         shell: bash
         run: |
           cargo test --locked -- --ignored live:: --test-threads=1
-      # Weekly only: it needs Microsoft and Google up, which no merge should wait on.
       - name: Tests against the sign-in providers
-        if: github.event_name == 'schedule'
         shell: bash
         run: cargo test --locked -- --ignored live_oauth
       - name: GreenMail's log
@@ -335,9 +330,6 @@ jobs:
             }
             Write-Host "GitHub Mac build passed: $($run.html_url)"
             "run_url=$($run.html_url)" | Add-Content $env:GITHUB_OUTPUT
-            # The weekly advisory run does not publish. Its unchanged source
-            # still needs a green Mac result, but old run artifacts may expire.
-            if ($env:GITHUB_EVENT_NAME -eq 'schedule') { exit 0 }
             $response = $client.GetAsync("$api/actions/runs/$($run.id)/artifacts?per_page=100").GetAwaiter().GetResult()
             try {
               if ([int]$response.StatusCode -ne 200) { throw "GitHub artifact lookup returned HTTP $([int]$response.StatusCode)" }
@@ -398,7 +390,6 @@ jobs:
             $downloadClient.Dispose()
           }
       - uses: https://data.forgejo.org/forgejo/upload-artifact@v4
-        if: github.event_name != 'schedule'
         with:
           name: tuimail-macos
           path: macos/*.tar.gz
@@ -407,7 +398,6 @@ jobs:
   release:
     name: Release
     needs: [linux, live, windows, macos]
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: windows-latest
     timeout-minutes: 10
     defaults:
