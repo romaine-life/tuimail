@@ -27,6 +27,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use crate::account::{Account, Auth, Security};
+use crate::logfile::{self, Class};
 use crate::net::{self, Endpoint};
 use crate::secrets::Secret;
 use crate::text;
@@ -458,7 +459,7 @@ async fn token_request(provider: Provider, params: &[(&str, &str)]) -> Result<To
         post_form(&mut conn, host, path, &form(params)),
     )
     .await
-    .map_err(|_| anyhow!("{host} didn't answer in time"))??;
+    .map_err(|_| Class::Timeout.with(format!("{host} didn't answer in time")))??;
     tokens_from(provider, status, &body)
 }
 
@@ -478,18 +479,25 @@ struct TokenAnswer {
 
 /// Tokens from the token endpoint's answer, checked.
 fn tokens_from(provider: Provider, status: u16, body: &[u8]) -> Result<Tokens> {
-    let answer: TokenAnswer = serde_json::from_slice(body)
-        .map_err(|_| anyhow!("{}'s answer didn't read (HTTP {status})", provider.name()))?;
+    let answer: TokenAnswer = serde_json::from_slice(body).map_err(|_| {
+        Class::Http(status).with(format!(
+            "{}'s answer didn't read (HTTP {status})",
+            provider.name()
+        ))
+    })?;
     if let Some(error) = answer.error {
         let said = text::one_line(answer.error_description.as_deref().unwrap_or(&error), 200);
         // The refresh token is no good any more: only a new sign-in helps.
         if error == "invalid_grant" {
             return Err(anyhow!(SignInAgain(said)));
         }
-        bail!("{} refused: {said}", provider.name());
+        bail!(
+            Class::SignInRefused(logfile::oauth_error(&error))
+                .with(format!("{} refused: {said}", provider.name()))
+        );
     }
     if !(200..300).contains(&status) {
-        bail!("{} answered HTTP {status}", provider.name());
+        bail!(Class::Http(status).with(format!("{} answered HTTP {status}", provider.name())));
     }
     let usable =
         |t: &str| !t.is_empty() && t.len() <= MAX_TOKEN && t.bytes().all(|b| b.is_ascii_graphic());
@@ -786,6 +794,27 @@ mod tests {
         ] {
             assert!(parse_response(bad).is_err());
         }
+    }
+
+    #[test]
+    fn a_refusal_is_its_code_and_not_the_providers_words() {
+        use crate::logfile::tests::{assert_kept_out, private_words};
+        let answer = |error: &str| {
+            serde_json::json!({"error": error, "error_description": private_words()}).to_string()
+        };
+        let refused =
+            |error| tokens_from(Provider::Google, 400, answer(error).as_bytes()).unwrap_err();
+        assert_kept_out(
+            &refused("invalid_client"),
+            Class::SignInRefused("invalid_client"),
+        );
+        assert_kept_out(
+            &refused("private.person@example.org"),
+            Class::SignInRefused("unknown"),
+        );
+        assert_kept_out(&refused("invalid_grant"), Class::SignInAgain);
+        let html = tokens_from(Provider::Google, 502, b"<html>private").unwrap_err();
+        assert_eq!(logfile::class_of(&html), Class::Http(502));
     }
 
     #[test]

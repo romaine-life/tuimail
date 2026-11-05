@@ -9,6 +9,7 @@ use base64::Engine;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::account::{Auth, Security};
+use crate::logfile::Class;
 use crate::net::{self, Conn, Endpoint};
 use crate::text;
 
@@ -61,14 +62,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Pop3<S> {
     async fn status(&mut self) -> Result<String> {
         self.status_or_challenge()
             .await?
-            .ok_or_else(|| anyhow!("the server isn't speaking POP3"))
+            .ok_or_else(|| anyhow!(Class::Protocol.with("the server isn't speaking POP3")))
     }
 
     /// [`Pop3::status`], or `None` for a SASL challenge (`+ `).
     async fn status_or_challenge(&mut self) -> Result<Option<String>> {
         let line = tokio::time::timeout(TIMEOUT, net::read_line(&mut self.stream, MAX_LINE))
             .await
-            .map_err(|_| anyhow!("the POP3 server stopped answering"))??;
+            .map_err(|_| Class::Timeout.with("the POP3 server stopped answering"))??;
         let line = String::from_utf8_lossy(&line);
         if let Some(rest) = line.strip_prefix("+OK") {
             Ok(Some(rest.trim().to_string()))
@@ -77,7 +78,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Pop3<S> {
         } else if line == "+" || line.starts_with("+ ") {
             Ok(None)
         } else {
-            bail!("the server isn't speaking POP3")
+            bail!(Class::Protocol.with("the server isn't speaking POP3"))
         }
     }
 
@@ -92,7 +93,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Pop3<S> {
             stream.flush().await
         })
         .await
-        .map_err(|_| anyhow!("the POP3 server stopped reading"))??;
+        .map_err(|_| Class::Timeout.with("the POP3 server stopped reading"))??;
         Ok(())
     }
 
@@ -116,7 +117,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Pop3<S> {
             let line =
                 tokio::time::timeout(TIMEOUT, net::read_line(&mut self.stream, MAX_DATA_LINE))
                     .await
-                    .map_err(|_| anyhow!("the POP3 server stopped sending"))?;
+                    .map_err(|_| Class::Timeout.with("the POP3 server stopped sending"))?;
             let line = match line {
                 Ok(line) => line,
                 Err(e) if e.kind() == std::io::ErrorKind::InvalidData => bail!(BadMessage),
@@ -377,6 +378,17 @@ pub mod tests {
             }
         });
         client
+    }
+
+    #[tokio::test]
+    async fn what_a_server_says_after_err_stays_on_the_screen() {
+        use crate::logfile::tests::assert_kept_out;
+        let stream = scripted(vec![(
+            "",
+            "-ERR no mailbox for private.person@example.org\r\n",
+        )]);
+        let error = Pop3::new(stream).greeting().await.unwrap_err();
+        assert_kept_out(&error, Class::ServerRefused(None));
     }
 
     #[tokio::test]

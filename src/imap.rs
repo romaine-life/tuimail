@@ -9,6 +9,7 @@ use async_imap::types::{Fetch, Flag, NameAttribute};
 use futures::TryStreamExt;
 
 use crate::account::{Account, Auth, Security};
+use crate::logfile::Class;
 use crate::mail;
 use crate::net::{self, Conn, Endpoint};
 use crate::store::{Flags, Folder, Header, Role};
@@ -71,8 +72,8 @@ async fn timed<T>(
                 text::one_line(&e.to_string(), 300)
             )))
         }
-        Ok(Err(e)) => bail!("{what}: {}", text::one_line(&e.to_string(), 300)),
-        Err(_) => bail!("{what}: the server stopped answering"),
+        Ok(Err(e)) => Err(anyhow::Error::new(e).context(what.to_string())),
+        Err(_) => bail!(Class::Timeout.with(format!("{what}: the server stopped answering"))),
     }
 }
 
@@ -96,8 +97,10 @@ pub async fn connect(
     let mut client = async_imap::Client::new(conn);
     let greeting = tokio::time::timeout(TIMEOUT, client.read_response())
         .await
-        .map_err(|_| anyhow!("{} didn't greet", endpoint.shown()))??
-        .ok_or_else(|| anyhow!("{} closed the connection", endpoint.shown()))?;
+        .map_err(|_| Class::Timeout.with(format!("{} didn't greet", endpoint.shown())))??
+        .ok_or_else(|| {
+            Class::ConnectionLost.with(format!("{} closed the connection", endpoint.shown()))
+        })?;
     if let async_imap::imap_proto::Response::Data {
         status: async_imap::imap_proto::Status::Bye,
         ..
@@ -134,12 +137,14 @@ pub async fn connect(
         }
     };
     let mut session = match tokio::time::timeout(TIMEOUT, login).await {
-        Err(_) => bail!("{} didn't answer the login", endpoint.shown()),
+        Err(_) => {
+            bail!(Class::Timeout.with(format!("{} didn't answer the login", endpoint.shown())))
+        }
         Ok(Ok(session)) => session,
         Ok(Err((async_imap::error::Error::No(words), _))) if wrong_password(&words) => {
             bail!(Refused(text::one_line(&words, 200)))
         }
-        Ok(Err((e, _))) => bail!("cannot log in: {}", text::one_line(&e.to_string(), 200)),
+        Ok(Err((e, _))) => return Err(anyhow::Error::new(e).context("cannot log in")),
     };
     let caps = timed(TIMEOUT, "CAPABILITY", session.capabilities()).await?;
     let caps = Caps {
@@ -922,7 +927,7 @@ pub async fn idle(session: Session, limit: Duration) -> Result<(Session, bool)> 
     let mut handle = session.idle();
     tokio::time::timeout(TIMEOUT, handle.init())
         .await
-        .map_err(|_| anyhow!("IDLE: the server stopped answering"))?
+        .map_err(|_| Class::Timeout.with("IDLE: the server stopped answering"))?
         .context("IDLE")?;
     let changed = {
         let (wait, _stop) = handle.wait_with_timeout(limit);
@@ -933,7 +938,7 @@ pub async fn idle(session: Session, limit: Duration) -> Result<(Session, bool)> 
     };
     let session = tokio::time::timeout(TIMEOUT, handle.done())
         .await
-        .map_err(|_| anyhow!("IDLE: the server stopped answering"))?
+        .map_err(|_| Class::Timeout.with("IDLE: the server stopped answering"))?
         .context("IDLE")?;
     Ok((session, changed))
 }
@@ -990,6 +995,50 @@ mod tests {
         connect(&endpoint, "me", "pw", Auth::Password)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_refusal_quoting_a_folder_stays_on_the_screen() {
+        use crate::logfile::tests::{assert_kept_out, private_words};
+        let (mut session, _) = scripted(|tag, _| {
+            format!(
+                "{tag} NO [NONEXISTENT] {} doesn't exist\r\n",
+                private_words()
+            )
+            .into_bytes()
+        })
+        .await;
+        let error = select(&mut session, "Clients/Acme").await.err().unwrap();
+        assert_kept_out(&error, Class::ServerRefused(Some("NONEXISTENT")));
+    }
+
+    #[tokio::test]
+    async fn a_refused_login_is_its_code_and_not_the_servers_words() {
+        use crate::logfile::tests::{assert_kept_out, private_words};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            write.write_all(b"* OK ready\r\n").await.unwrap();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let tag = line.split(' ').next().unwrap().to_string();
+            let no = format!("{tag} NO [AUTHENTICATIONFAILED] {}\r\n", private_words());
+            write.write_all(no.as_bytes()).await.unwrap();
+        });
+        let endpoint = Endpoint {
+            host: "127.0.0.1".into(),
+            port,
+            security: Security::None,
+            tls: net::tls_config(None).unwrap(),
+        };
+        let error = connect(&endpoint, "me", "pw", Auth::Password)
+            .await
+            .err()
+            .unwrap();
+        assert_kept_out(&error, Class::LoginRefused(Some("AUTHENTICATIONFAILED")));
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 
 use crate::account::{Account, Auth, PasswordFrom};
+use crate::logfile::Class;
 use crate::oauth::{self, Tokens};
 use crate::text;
 
@@ -67,7 +68,8 @@ pub fn init_keychain() -> bool {
 }
 
 fn entry(id: &str) -> Result<keyring_core::Entry> {
-    keyring_core::Entry::new(SERVICE, id).map_err(|e| anyhow!("the keychain: {e}"))
+    keyring_core::Entry::new(SERVICE, id)
+        .map_err(|e| anyhow!(Class::Keychain.with(format!("the keychain: {e}"))))
 }
 
 /// The keychain entry of an account's refresh token: its own, apart from
@@ -84,7 +86,9 @@ pub async fn keychain_get(id: &str) -> Result<Option<Secret>> {
     tokio::task::spawn_blocking(move || match entry(&id)?.get_password() {
         Ok(p) => Ok(Some(Secret(p))),
         Err(keyring_core::Error::NoEntry) => Ok(None),
-        Err(e) => Err(anyhow!("cannot read the keychain: {e}")),
+        Err(e) => Err(anyhow!(
+            Class::Keychain.with(format!("cannot read the keychain: {e}"))
+        )),
     })
     .await?
 }
@@ -92,9 +96,9 @@ pub async fn keychain_get(id: &str) -> Result<Option<Secret>> {
 pub async fn keychain_set(id: &str, secret: &Secret) -> Result<()> {
     let (id, secret) = (id.to_string(), secret.clone());
     tokio::task::spawn_blocking(move || {
-        entry(&id)?
-            .set_password(secret.expose())
-            .map_err(|e| anyhow!("cannot save the password in the keychain: {e}"))
+        entry(&id)?.set_password(secret.expose()).map_err(|e| {
+            anyhow!(Class::Keychain.with(format!("cannot save the password in the keychain: {e}")))
+        })
     })
     .await?
 }
@@ -103,7 +107,9 @@ pub async fn keychain_delete(id: &str) -> Result<()> {
     let id = id.to_string();
     tokio::task::spawn_blocking(move || match entry(&id)?.delete_credential() {
         Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
-        Err(e) => Err(anyhow!("cannot remove the password from the keychain: {e}")),
+        Err(e) => Err(anyhow!(
+            Class::Keychain.with(format!("cannot remove the password from the keychain: {e}"))
+        )),
     })
     .await?
 }
@@ -150,7 +156,7 @@ pub async fn run_command(argv: &[String], interactive: bool) -> Result<Secret> {
     };
     let (out, status) = tokio::time::timeout(timeout, run)
         .await
-        .map_err(|_| anyhow!("{shown} took too long"))??;
+        .map_err(|_| Class::Timeout.with(format!("{shown} took too long")))??;
     if !status.success() {
         bail!("{shown} failed ({status})");
     }
@@ -172,6 +178,8 @@ pub async fn run_command(argv: &[String], interactive: bool) -> Result<Secret> {
 pub struct Credentials {
     account: Arc<Account>,
     id: String,
+    /// Its place in `accounts.toml`, which is all the log calls it.
+    number: usize,
     secret: Arc<Mutex<Option<Secret>>>,
     /// The keychain can be used.
     keychain: bool,
@@ -206,6 +214,7 @@ impl Credentials {
         Self {
             account,
             id,
+            number: 0,
             secret: Arc::new(Mutex::new(None)),
             keychain,
             keychain_refused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -419,6 +428,16 @@ impl Credentials {
 
     pub fn account(&self) -> &Account {
         &self.account
+    }
+
+    /// With its place in `accounts.toml`, counted from 1.
+    pub fn numbered(mut self, number: usize) -> Self {
+        self.number = number;
+        self
+    }
+
+    pub fn number(&self) -> usize {
+        self.number
     }
 }
 

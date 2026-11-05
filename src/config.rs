@@ -94,6 +94,8 @@ fn make_private_dir(dir: &Path) -> Result<PathBuf> {
         ("tuimail.db", Entry::File),
         ("tuimail.db-wal", Entry::File),
         ("tuimail.db-shm", Entry::File),
+        (crate::logfile::FILE, Entry::File),
+        (crate::logfile::OLD_FILE, Entry::File),
         ("drafts", Entry::Folder),
         ("opened", Entry::Folder),
         (crate::agent::SOCKET, Entry::Socket),

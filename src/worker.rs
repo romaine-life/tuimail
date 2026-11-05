@@ -7,13 +7,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use rustls::ClientConfig;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 
 use crate::account::{Account, Protocol};
 use crate::imap::{self, Caps, FlagKind, Session};
+use crate::logfile::{self, Class, Link};
 use crate::net::Endpoint;
 use crate::secrets::{Credentials, NeedPassword};
 use crate::store::{Flags, Folder, Header, Known};
@@ -483,6 +484,7 @@ async fn run_imap(
 ) {
     let mut session: Option<(Session, Caps)> = None;
     let mut failed_at: Option<Instant> = None;
+    let mut link = Link::new(creds.number());
     let mut watcher = Watcher::default();
     // Changes asked for while the connection was down, in order, and how
     // many times each broke a connection that was up.
@@ -532,6 +534,7 @@ async fn run_imap(
                         let idle = s.1.idle;
                         session = Some(s);
                         failed_at = None;
+                        link.back();
                         sink(Event::State(State::Online));
                         // Back (for a check): what was held goes before
                         // anything newer, in order.
@@ -548,6 +551,7 @@ async fn run_imap(
                     }
                     Err(e) => {
                         failed_at = Some(Instant::now());
+                        link.failed("logging in", &e);
                         sink(Event::State(login_failed(&e)));
                         if request.changes() {
                             held.push_back((request, tries));
@@ -563,6 +567,11 @@ async fn run_imap(
             };
             if let Err(e) = handle_imap(request.clone(), s, *caps, &creds, &sink).await {
                 let lost = broken(&e);
+                if lost {
+                    link.failed(request.what(), &e);
+                } else {
+                    logfile::failed(request.what(), Some(creds.number()), &e);
+                }
                 let error = text::one_line(&format!("{e:#}"), 300);
                 if lost && request.changes() && tries + 1 < MAX_TRIES {
                     // Made again once the connection is back.
@@ -679,11 +688,14 @@ async fn handle_imap(
                     result: Ok(raw),
                 }),
                 Err(e) if broken(&e) => return Err(e),
-                Err(e) => sink(Event::Body {
-                    folder,
-                    uid,
-                    result: Err(text::one_line(&format!("{e:#}"), 300)),
-                }),
+                Err(e) => {
+                    logfile::failed("downloading the message", Some(creds.number()), &e);
+                    sink(Event::Body {
+                        folder,
+                        uid,
+                        result: Err(text::one_line(&format!("{e:#}"), 300)),
+                    });
+                }
             }
         }
         Request::Flag {
@@ -893,13 +905,15 @@ async fn sync(s: &mut Session, folder: &str, known: Known, count: u32) -> Result
 /// change; reconnects after a failure, waiting longer each time.
 async fn watch_inbox(creds: Credentials, endpoint: Endpoint, sink: Sink) {
     let mut wait = Duration::from_secs(15);
+    let mut link = Link::new(creds.number());
     loop {
         let result: Result<()> = async {
             let (mut session, _) = imap_login(&creds, &endpoint).await?;
             tokio::time::timeout(imap::TIMEOUT, session.examine("INBOX"))
                 .await
-                .map_err(|_| anyhow!("EXAMINE: the server stopped answering"))??;
+                .map_err(|_| Class::Timeout.with("EXAMINE: the server stopped answering"))??;
             wait = Duration::from_secs(15);
+            link.back();
             loop {
                 let (back, changed) = imap::idle(session, IDLE_FOR).await?;
                 session = back;
@@ -913,11 +927,12 @@ async fn watch_inbox(creds: Credentials, endpoint: Endpoint, sink: Sink) {
             }
         }
         .await;
-        if let Err(e) = result
-            && matches!(login_failed(&e), State::NeedPassword { .. })
-        {
-            // The worker asks for the password; this waits for it.
-            wait = Duration::from_secs(60);
+        if let Err(e) = result {
+            link.failed("watching the inbox", &e);
+            if matches!(login_failed(&e), State::NeedPassword { .. }) {
+                // The worker asks for the password; this waits for it.
+                wait = Duration::from_secs(60);
+            }
         }
         tokio::time::sleep(wait).await;
         wait = (wait * 2).min(Duration::from_secs(10 * 60));
@@ -930,6 +945,7 @@ async fn run_pop(
     mut rx: UnboundedReceiver<Request>,
     sink: Sink,
 ) {
+    let mut link = Link::new(creds.number());
     while let Some(first) = rx.recv().await {
         for request in batch(first, &mut rx) {
             let Request::Pop {
@@ -952,10 +968,12 @@ async fn run_pop(
             );
             match check.await {
                 Ok(popped) => {
+                    link.back();
                     sink(Event::State(State::Online));
                     sink(Event::Popped(popped));
                 }
                 Err(e) => {
+                    link.failed("checking for mail", &e);
                     let state = login_failed(&e);
                     // The state says it all when the password is wanted.
                     let said = matches!(state, State::NeedPassword { .. });
@@ -1066,6 +1084,20 @@ pub async fn send(
     to: Vec<String>,
     raw: Vec<u8>,
 ) -> Result<()> {
+    let result = try_send(&creds, endpoint, from, to, raw).await;
+    if let Err(e) = &result {
+        logfile::failed("sending", Some(creds.number()), e);
+    }
+    result
+}
+
+async fn try_send(
+    creds: &Credentials,
+    endpoint: Endpoint,
+    from: String,
+    to: Vec<String>,
+    raw: Vec<u8>,
+) -> Result<()> {
     let secret = creds.get().await?;
     let account = creds.account();
     let result = smtp::send(
@@ -1101,6 +1133,68 @@ pub fn needs_password(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::anyhow;
+
+    /// The whole way: a worker, a server echoing what it was told, the file.
+    #[tokio::test]
+    async fn a_refused_login_reaches_the_log_as_a_number_and_a_class() {
+        use crate::account::Security;
+        use crate::logfile::tests::{
+            assert_nothing_private_in, child_dir, log_of_child, private_words,
+        };
+        use crate::secrets::Secret;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let Some(dir) = child_dir() else {
+            let (run, log) = log_of_child(
+                "worker::tests::a_refused_login_reaches_the_log_as_a_number_and_a_class",
+            );
+            assert!(run.status.success(), "{run:?}");
+            let said = "failed op=\"logging in\" account=2 class=login-refused \
+                        code=AUTHENTICATIONFAILED";
+            assert!(log.contains(said), "{log}");
+            assert_nothing_private_in(&log);
+            return;
+        };
+        logfile::open(&dir, 2).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            write.write_all(b"* OK ready\r\n").await.unwrap();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let tag = line.split(' ').next().unwrap().to_string();
+            let no = format!("{tag} NO [AUTHENTICATIONFAILED] {}\r\n", private_words());
+            write.write_all(no.as_bytes()).await.unwrap();
+        });
+        let account = Account {
+            name: "private.person@example.org".into(),
+            email: "private.person@example.org".into(),
+            host: "127.0.0.1".into(),
+            port: Some(port),
+            security: Security::None,
+            smtp_host: "127.0.0.1".into(),
+            smtp_port: Some(port),
+            smtp_security: Security::None,
+            ..Default::default()
+        };
+        let creds = Credentials::new(Arc::new(account.clone()), false).numbered(2);
+        creds.set(Secret::new("pw")).await;
+        let endpoints = Endpoints::of(&account, crate::net::tls_config(None).unwrap());
+        let (tx, mut rx) = unbounded_channel();
+        let sink: Sink = Arc::new(move |event| {
+            let _ = tx.send(event);
+        });
+        let worker = spawn(creds, endpoints, sink);
+        worker.tx.send(Request::Folders).unwrap();
+        while let Some(event) = rx.recv().await {
+            if matches!(event, Event::State(State::NeedPassword { .. })) {
+                return;
+            }
+        }
+        panic!("the worker ended without saying the login was refused");
+    }
 
     #[test]
     fn repeated_checks_waiting_together_run_once() {

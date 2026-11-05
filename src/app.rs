@@ -21,6 +21,7 @@ use crate::compose::{self, Draft};
 use crate::composer::{self, Composer, Kind};
 use crate::icons::Icons;
 use crate::imap::FlagKind;
+use crate::logfile::{self, stored};
 use crate::mail::{self, Addr, Body, Parsed};
 use crate::notify::{self, Notifications, Notifier};
 use crate::secrets::{Credentials, Secret};
@@ -792,9 +793,10 @@ impl App {
     /// Starts an account: its folders from the cache, its worker.
     fn add_account(&mut self, account: Account, password: Option<Secret>) -> usize {
         let id = account.id();
+        let number = self.accounts.len() + 1;
         let account = Arc::new(account);
         if account.protocol == Protocol::Pop3 {
-            let _ = self.store.set_folders(&id, &local_folders());
+            stored("set_folders", self.store.set_folders(&id, &local_folders()));
         }
         let folders = self.store.folders(&id).unwrap_or_default();
         let worker = if self.demo {
@@ -802,7 +804,7 @@ impl App {
         } else {
             match net::tls_config(account.certificate.as_deref()) {
                 Ok(tls) => {
-                    let creds = Credentials::new(account.clone(), self.keychain);
+                    let creds = Credentials::new(account.clone(), self.keychain).numbered(number);
                     if let Some(secret) = password {
                         let creds = creds.clone();
                         // Set before the worker can ask for it.
@@ -822,6 +824,7 @@ impl App {
                     Some(worker::spawn(creds, endpoints, sink))
                 }
                 Err(e) => {
+                    logfile::failed("starting the account", Some(number), &e);
                     self.error(format!("{}: {e:#}", account.shown_name()));
                     None
                 }
@@ -1198,7 +1201,10 @@ impl App {
                     return;
                 };
                 for (folder, uid, preview) in previews {
-                    let _ = self.store.set_preview(&account, &folder, uid, &preview);
+                    stored(
+                        "set_preview",
+                        self.store.set_preview(&account, &folder, uid, &preview),
+                    );
                     if let Some(item) = self
                         .items
                         .iter_mut()
@@ -1254,7 +1260,10 @@ impl App {
                 let id = self.accounts[i].id.clone();
                 if self.store.set_folders(&id, &folders).is_ok() {
                     for f in &folders {
-                        let _ = self.store.set_counts(&id, &f.name, f.unread, f.total);
+                        stored(
+                            "set_counts",
+                            self.store.set_counts(&id, &f.name, f.unread, f.total),
+                        );
                     }
                 }
                 self.accounts[i].folders = self.store.folders(&id).unwrap_or_default();
@@ -1262,7 +1271,7 @@ impl App {
                 // with it: not asked for again at every start.
                 for (folder, _, uids) in self.store.pending_deletes(&id).unwrap_or_default() {
                     if !folders.iter().any(|f| f.name == folder) {
-                        let _ = self.store.done_deletes(&id, &folder, &uids);
+                        stored("done_deletes", self.store.done_deletes(&id, &folder, &uids));
                     }
                 }
                 if let Place::Folder { account, folder } = &self.place
@@ -1284,11 +1293,14 @@ impl App {
                 low,
             } => {
                 let id = self.accounts[i].id.clone();
-                let _ = self.store.add_headers(&id, &folder, &headers);
+                stored(
+                    "add_headers",
+                    self.store.add_headers(&id, &folder, &headers),
+                );
                 let mut known = self.store.known(&id, &folder).unwrap_or_default();
                 if known.high > 0 && low < known.low {
                     known.low = low;
-                    let _ = self.store.set_known(&id, &folder, known);
+                    stored("set_known", self.store.set_known(&id, &folder, known));
                 }
                 // Asked again only if more came back.
                 if !headers.is_empty() {
@@ -1308,7 +1320,7 @@ impl App {
                 self.agent_downloads.remove(&key);
                 match result {
                     Ok(Some(raw)) => {
-                        let _ = self.store.save_body(&id, &folder, uid, &raw);
+                        stored("save_body", self.store.save_body(&id, &folder, uid, &raw));
                         for read in self.agent_reads_for(&key) {
                             self.agent_render(read.key, raw.clone(), read.max, read.reply);
                         }
@@ -1354,7 +1366,10 @@ impl App {
                 headers,
             } => {
                 let id = self.accounts[i].id.clone();
-                let _ = self.store.add_headers(&id, &folder, &headers);
+                stored(
+                    "add_headers",
+                    self.store.add_headers(&id, &folder, &headers),
+                );
                 if self.search.as_deref() == Some(query.as_str()) {
                     self.reload();
                     self.info(format!(
@@ -1397,7 +1412,7 @@ impl App {
                 // back there.
                 let id = self.accounts[i].id.clone();
                 let unread = self.unread_among(i, &folder, &moved);
-                let _ = self.store.remove(&id, &folder, &moved);
+                stored("remove", self.store.remove(&id, &folder, &moved));
                 let keys: Vec<_> = (moved.iter()).map(|u| (i, folder.clone(), *u)).collect();
                 for key in &keys {
                     self.local_removed.insert(key.clone(), Instant::now());
@@ -1418,7 +1433,7 @@ impl App {
             E::Deleted { folder, uids, all } => {
                 let id = self.accounts[i].id.clone();
                 if all {
-                    let _ = self.store.done_deletes(&id, &folder, &uids);
+                    stored("done_deletes", self.store.done_deletes(&id, &folder, &uids));
                 } else {
                     self.info(
                         "Deleted here; on the server they stay marked until another program's deletions there are done",
@@ -1452,7 +1467,10 @@ impl App {
             }
             E::Headers { folder, headers } => {
                 let id = self.accounts[i].id.clone();
-                let _ = self.store.add_headers(&id, &folder, &headers);
+                stored(
+                    "add_headers",
+                    self.store.add_headers(&id, &folder, &headers),
+                );
                 if self.shows(i, &folder) {
                     self.reload();
                 }
@@ -1519,7 +1537,7 @@ impl App {
         self.accounts[i].syncing.remove(&s.folder);
         let before = self.store.known(&id, &s.folder).unwrap_or_default();
         if s.reset {
-            let _ = self.store.reset_folder(&id, &s.folder);
+            stored("reset_folder", self.store.reset_folder(&id, &s.folder));
             // Its UIDs mean other messages now: nothing may act on the old.
             let stale = |key: &(usize, String, u32)| key.0 == i && key.1 == s.folder;
             if self.reader.as_ref().is_some_and(|r| stale(&r.key())) {
@@ -1533,10 +1551,13 @@ impl App {
                 self.pending = None;
             }
         }
-        let _ = self.store.add_headers(&id, &s.folder, &s.new);
+        stored(
+            "add_headers",
+            self.store.add_headers(&id, &s.folder, &s.new),
+        );
         // People who write to you are offered when you write.
         let senders: Vec<Addr> = s.new.iter().map(|h| h.summary.from.clone()).collect();
-        let _ = self.store.remember(&senders, false, now());
+        stored("remember", self.store.remember(&senders, false, now()));
         if let Some((low, high)) = s.checked {
             let present: HashSet<u32> = s.flags.iter().map(|(u, _)| *u).collect();
             let cached = self
@@ -1548,7 +1569,7 @@ impl App {
                 .into_iter()
                 .filter(|u| !present.contains(u))
                 .collect();
-            let _ = self.store.remove(&id, &s.folder, &gone);
+            stored("remove", self.store.remove(&id, &s.folder, &gone));
             // Messages the server has that the cache lost (a move or delete
             // the server refused) come back, unless moved away here just now.
             self.local_removed
@@ -1580,18 +1601,24 @@ impl App {
                 .filter(|(uid, _)| !self.local_flags.contains_key(&(i, s.folder.clone(), *uid)))
                 .cloned()
                 .collect();
-            let _ = self.store.set_flags(&id, &s.folder, &flags);
+            stored("set_flags", self.store.set_flags(&id, &s.folder, &flags));
         }
-        let _ = self.store.set_known(
-            &id,
-            &s.folder,
-            Known {
-                uidvalidity: s.uidvalidity,
-                low: s.low,
-                high: s.high,
-            },
+        stored(
+            "set_known",
+            self.store.set_known(
+                &id,
+                &s.folder,
+                Known {
+                    uidvalidity: s.uidvalidity,
+                    low: s.low,
+                    high: s.high,
+                },
+            ),
         );
-        let _ = self.store.set_counts(&id, &s.folder, s.unread, s.total);
+        stored(
+            "set_counts",
+            self.store.set_counts(&id, &s.folder, s.unread, s.total),
+        );
         if let Some(f) = self.accounts[i]
             .folders
             .iter_mut()
@@ -1639,14 +1666,17 @@ impl App {
         }
         self.make_previews(i, previews);
         let senders: Vec<Addr> = summaries.iter().map(|s| s.from.clone()).collect();
-        let _ = self.store.remember(&senders, false, now());
-        let _ = self.store.pop_skip_all(&id, &popped.skipped);
+        stored("remember", self.store.remember(&senders, false, now()));
+        stored(
+            "pop_skip_all",
+            self.store.pop_skip_all(&id, &popped.skipped),
+        );
         let mut keep = popped.on_server.clone();
         for gone in &popped.deleted {
             keep.remove(gone);
         }
-        let _ = self.store.pop_forget(&id, &keep);
-        let _ = self.store.set_pop_checked(&id);
+        stored("pop_forget", self.store.pop_forget(&id, &keep));
+        stored("set_pop_checked", self.store.set_pop_checked(&id));
         self.accounts[i].popped_once = true;
         if !first {
             self.announce(i, summaries.iter());
@@ -1654,7 +1684,10 @@ impl App {
         let mut again = popped.more || std::mem::take(&mut self.accounts[i].pop_again);
         if !self.accounts[i].account.leave_on_server && !added.is_empty() {
             // Taken off the server at the next check, now that they're kept.
-            let _ = self.store.mark_pop_removal(&id, "INBOX", &added);
+            stored(
+                "mark_pop_removal",
+                self.store.mark_pop_removal(&id, "INBOX", &added),
+            );
             again = true;
         }
         self.refresh_counts(i, "INBOX");
@@ -1686,7 +1719,10 @@ impl App {
     fn refresh_counts(&mut self, i: usize, folder: &str) {
         let id = self.accounts[i].id.clone();
         if let Ok((unread, total)) = self.store.count(&id, folder) {
-            let _ = self.store.set_counts(&id, folder, unread, total);
+            stored(
+                "set_counts",
+                self.store.set_counts(&id, folder, unread, total),
+            );
             if let Some(f) = self.accounts[i]
                 .folders
                 .iter_mut()
@@ -1718,7 +1754,7 @@ impl App {
             let now = self.uidvalidity(i, &folder);
             let gone = !self.accounts[i].folders.iter().any(|f| f.name == folder);
             if gone || (now != 0 && uidvalidity != 0 && now != uidvalidity) {
-                let _ = self.store.done_deletes(&id, &folder, &uids);
+                stored("done_deletes", self.store.done_deletes(&id, &folder, &uids));
                 continue;
             }
             self.send(
@@ -2195,7 +2231,7 @@ impl App {
             }
             changed.push((*uid, flags));
         }
-        let _ = self.store.set_flags(&id, folder, &changed);
+        stored("set_flags", self.store.set_flags(&id, folder, &changed));
         changed.len()
     }
 
@@ -2229,7 +2265,10 @@ impl App {
                     } else {
                         (i64::from(f.unread) + delta).min(i64::from(f.total.max(f.unread))) as u32
                     };
-                    let _ = self.store.set_counts(&id, &folder, f.unread, f.total);
+                    stored(
+                        "set_counts",
+                        self.store.set_counts(&id, &folder, f.unread, f.total),
+                    );
                 }
             }
             if !self.accounts[account].is_pop() {
@@ -2602,7 +2641,7 @@ impl App {
             self.error(why);
             return Err(why);
         }
-        let _ = self.store.set_undone(change.id);
+        stored("set_undone", self.store.set_undone(change.id));
         self.info(format!("Undone: {what}"));
         for (account, folder, uidvalidity, moved_to, messages) in groups {
             match &change.what {
@@ -2666,7 +2705,7 @@ impl App {
                 .iter()
                 .map(|u| (account, from.to_string(), *u))
                 .collect();
-            let _ = self.store.move_local(&id, from, &uids, to);
+            stored("move_local", self.store.move_local(&id, from, &uids, to));
             self.refresh_counts(account, from);
             self.refresh_counts(account, to);
             let missing = messages.len().saturating_sub(uids.len());
@@ -2747,6 +2786,9 @@ impl App {
         let (tx, id) = (self.tx.clone(), self.accounts[i].id.clone());
         tokio::spawn(async move {
             let result = sign_in(client, &account.email, &tx).await;
+            if let Err(e) = &result {
+                logfile::failed("signing in", Some(i + 1), e);
+            }
             let _ = tx.send(AppEvent::SignedIn {
                 account: id,
                 result: result.map_err(|e| text::one_line(&format!("{e:#}"), 300)),
@@ -2799,7 +2841,10 @@ impl App {
             };
             match agent::listen(&socket, self.tx.clone()) {
                 Ok(listener) => self.agents = Some(listener),
-                Err(e) => self.error(format!("AI agents: {e:#}")),
+                Err(e) => {
+                    logfile::failed("listening for agents", None, &e);
+                    self.error(format!("AI agents: {e:#}"));
+                }
             }
         } else if !wanted && self.agents.is_some() {
             self.agents = None;
@@ -3649,7 +3694,7 @@ impl App {
             }
             self.refresh_counts(account, to);
         } else {
-            let _ = self.store.remove(&id, folder, uids);
+            stored("remove", self.store.remove(&id, folder, uids));
             for key in &keys {
                 self.local_removed.insert(key.clone(), Instant::now());
             }
@@ -3695,7 +3740,10 @@ impl App {
         {
             f.total = f.total.saturating_sub(n as u32);
             f.unread = f.unread.saturating_sub(unread);
-            let _ = self.store.set_counts(&id, folder, f.unread, f.total);
+            stored(
+                "set_counts",
+                self.store.set_counts(&id, folder, f.unread, f.total),
+            );
         }
     }
 
@@ -3751,16 +3799,22 @@ impl App {
             .collect();
         let unread = self.unread_among(account, folder, uids);
         // Gone for good: the changes kept about them keep nothing of them.
-        let _ = self.store.forget_changed(&id, folder, uids);
+        stored(
+            "forget_changed",
+            self.store.forget_changed(&id, folder, uids),
+        );
         if self.accounts[account].is_pop() {
-            let _ = self.store.mark_pop_removal(&id, folder, uids);
-            let _ = self.store.remove(&id, folder, uids);
+            stored(
+                "mark_pop_removal",
+                self.store.mark_pop_removal(&id, folder, uids),
+            );
+            stored("remove", self.store.remove(&id, folder, uids));
             self.refresh_counts(account, folder);
             if !self.demo {
                 self.pop_check(account);
             }
         } else {
-            let _ = self.store.remove(&id, folder, uids);
+            stored("remove", self.store.remove(&id, folder, uids));
             for key in &keys {
                 self.local_removed.insert(key.clone(), Instant::now());
             }
@@ -4159,7 +4213,7 @@ impl App {
         self.composer = None;
         let n = sent.to.len();
         self.info(format!("Sent to {}", plural(n, "recipient")));
-        let _ = self.store.remember(&sent.to, true, now());
+        stored("remember", self.store.remember(&sent.to, true, now()));
         // A copy in Sent.
         let pop = self.accounts[i].is_pop() || self.demo;
         if pop {
@@ -5228,7 +5282,7 @@ impl App {
         let state = self.accounts.remove(i);
         let id = state.id.clone();
         drop(state);
-        let _ = self.store.forget_account(&id);
+        stored("forget_account", self.store.forget_account(&id));
         if let Some(path) = &self.accounts_path
             && let Err(e) = account::remove(path, &id)
         {
@@ -5453,6 +5507,9 @@ impl App {
                 Ok(Some(tokens))
             }
             .await;
+            if let Err(e) = &result {
+                logfile::failed("checking a new account", None, e);
+            }
             let _ = tx.send(AppEvent::Checked {
                 result: result.map_err(|e: anyhow::Error| text::one_line(&format!("{e:#}"), 300)),
             });
@@ -5500,6 +5557,7 @@ impl App {
             let tx = self.tx.clone();
             tokio::spawn(async move {
                 if let Err(e) = crate::secrets::keychain_set(&key, &secret).await {
+                    logfile::failed("saving to the keychain", None, &e);
                     // The form is closed by now: said on the status line.
                     let _ = tx.send(AppEvent::Failed {
                         error: text::one_line(&format!("{e:#}"), 300),

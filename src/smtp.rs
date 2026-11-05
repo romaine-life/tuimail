@@ -12,6 +12,7 @@ use base64::Engine;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::account::{self, Auth, Security};
+use crate::logfile::Class;
 use crate::net::{self, Conn, Endpoint};
 use crate::text;
 
@@ -59,13 +60,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Smtp<S> {
         for _ in 0..MAX_REPLY_LINES {
             let line = tokio::time::timeout(timeout, net::read_line(&mut self.stream, MAX_LINE))
                 .await
-                .map_err(|_| anyhow!("the SMTP server stopped answering"))??;
+                .map_err(|_| Class::Timeout.with("the SMTP server stopped answering"))??;
             let line = String::from_utf8_lossy(&line).into_owned();
             let code = line
                 .get(..3)
                 .and_then(|c| c.parse::<u16>().ok())
                 .filter(|c| (200..600).contains(c))
-                .ok_or_else(|| anyhow!("the server isn't speaking SMTP"))?;
+                .ok_or_else(|| Class::Protocol.with("the server isn't speaking SMTP"))?;
             let more = line.as_bytes().get(3) == Some(&b'-');
             text.push(line.get(4..).unwrap_or("").to_string());
             if !more {
@@ -75,7 +76,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Smtp<S> {
                 });
             }
         }
-        bail!("the SMTP server's reply is too long")
+        bail!(Class::Protocol.with("the SMTP server's reply is too long"))
     }
 
     async fn reply(&mut self) -> Result<Reply> {
@@ -93,7 +94,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Smtp<S> {
             stream.flush().await
         })
         .await
-        .map_err(|_| anyhow!("the SMTP server stopped reading"))??;
+        .map_err(|_| Class::Timeout.with("the SMTP server stopped reading"))??;
         Ok(())
     }
 
@@ -102,11 +103,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Smtp<S> {
         self.send(line).await?;
         let reply = self.reply().await?;
         if !ok.contains(&reply.code) {
-            bail!(
+            bail!(Class::Smtp(reply.code).with(format!(
                 "{what}: the server said {} {}",
                 reply.code,
                 text::one_line(&reply.text, 200)
-            );
+            )));
         }
         Ok(reply)
     }
@@ -114,10 +115,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Smtp<S> {
     pub async fn greeting(&mut self) -> Result<()> {
         let reply = self.reply().await?;
         if reply.code != 220 {
-            bail!(
+            bail!(Class::Smtp(reply.code).with(format!(
                 "the server isn't taking mail: {}",
                 text::one_line(&reply.text, 200)
-            );
+            )));
         }
         Ok(())
     }
@@ -169,7 +170,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Smtp<S> {
         let refused = |reply: Reply| {
             let words = text::one_line(&reply.text, 200);
             if (400..500).contains(&reply.code) {
-                anyhow!("the server can't log in now: {words}")
+                anyhow!(
+                    Class::Smtp(reply.code).with(format!("the server can't log in now: {words}"))
+                )
             } else {
                 anyhow!(Refused(words))
             }
@@ -258,14 +261,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Smtp<S> {
             stream.flush().await
         })
         .await
-        .map_err(|_| anyhow!("sending took too long"))??;
+        .map_err(|_| Class::Timeout.with("sending took too long"))??;
         let reply = self.reply_within(DATA_TIMEOUT).await?;
         if reply.code != 250 {
-            bail!(
+            bail!(Class::Smtp(reply.code).with(format!(
                 "the server didn't take the message: {} {}",
                 reply.code,
                 text::one_line(&reply.text, 200)
-            );
+            )));
         }
         Ok(())
     }
@@ -372,6 +375,29 @@ mod tests {
         assert_eq!(dot_stuffed(b".\nx"), b"..\r\nx\r\n.\r\n");
         assert_eq!(dot_stuffed(b"a\rb"), b"a\r\nb\r\n.\r\n");
         assert_eq!(dot_stuffed(b""), b".\r\n");
+    }
+
+    #[tokio::test]
+    async fn a_refused_recipient_is_a_code_in_the_log() {
+        use crate::logfile::tests::assert_kept_out;
+        let stream = scripted(vec![
+            ("", "220 mx ESMTP\r\n"),
+            ("EHLO [127.0.0.1]", "250 mx hello\r\n"),
+            ("MAIL FROM:<me@example.org>", "250 ok\r\n"),
+            (
+                "RCPT TO:<private.person@example.org>",
+                "550 5.1.1 <private.person@example.org> no such user\r\n",
+            ),
+        ]);
+        let mut smtp = Smtp::new(stream);
+        smtp.greeting().await.unwrap();
+        smtp.ehlo().await.unwrap();
+        let to = ["private.person@example.org".to_string()];
+        let error = smtp
+            .send_mail("me@example.org", &to, b"x")
+            .await
+            .unwrap_err();
+        assert_kept_out(&error, Class::Smtp(550));
     }
 
     #[tokio::test]

@@ -22,6 +22,7 @@ use tokio_rustls::client::TlsStream;
 
 use crate::account::{self, Security};
 use crate::config;
+use crate::logfile::Class;
 
 /// How long a connection, or the TLS handshake, may take.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -126,7 +127,7 @@ pub async fn connect(endpoint: &Endpoint) -> Result<Conn> {
     };
     let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect((host, endpoint.port)))
         .await
-        .map_err(|_| anyhow!("{} didn't answer", endpoint.shown()))?
+        .map_err(|_| Class::Timeout.with(format!("{} didn't answer", endpoint.shown())))?
         .with_context(|| format!("cannot connect to {}", endpoint.shown()))?;
     let _ = tcp.set_nodelay(true);
     if endpoint.security == Security::None {
@@ -208,8 +209,13 @@ pub async fn start_tls(tcp: TcpStream, endpoint: &Endpoint) -> Result<Conn> {
     let connector = TlsConnector::from(endpoint.tls.clone());
     let tls = tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(name, tcp))
         .await
-        .map_err(|_| anyhow!("{} didn't finish the TLS handshake", endpoint.shown()))?
-        .map_err(|e| anyhow!("TLS with {} failed: {e}", endpoint.shown()))?;
+        .map_err(|_| {
+            Class::Timeout.with(format!(
+                "{} didn't finish the TLS handshake",
+                endpoint.shown()
+            ))
+        })?
+        .with_context(|| format!("TLS with {} failed", endpoint.shown()))?;
     Ok(Conn::Tls(Box::new(tls)))
 }
 

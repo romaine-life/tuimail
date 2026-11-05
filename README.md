@@ -320,6 +320,7 @@ What an agent reads goes to its AI provider, as anything else you show it. AI ag
 - **Attachments are handled with care.** File names are cleaned (no folders, no hidden extensions), files never overwrite one another, they're marked as downloaded from the internet, and only pictures, sound, video, PDF and plain text open without asking (Office files, archives, CSV and the rest ask first). Web links open only through your browser, and only `http` and `https`; the link list shows where each one really goes, with look-alike letters spelled out (`xn--`). `mailto` links and `U`'s addresses open here, as a message to write; `U`'s web page is shown before it opens.
 - **Pastes stay text.** A paste that arrives as keystrokes (as it always does on Windows) is never taken for commands, and a question that waits for `y` ignores one typed too soon.
 - **Local data is yours alone.** The data folder is made readable only by you; the cache (`tuimail.db`) overwrites what's deleted.
+- **The log holds no mail.** `tuimail.log` says what failed and when, in fixed words and numbers: never an address, subject, folder name, a server's wording, a token or a password.
 
 To report a problem, see [SECURITY.md](SECURITY.md).
 
@@ -333,7 +334,7 @@ Everything is in one folder on your machine (`tuimail --help` prints its path):
 | Linux | `~/.local/share/tuimail` |
 | Windows | `%LOCALAPPDATA%\tuimail` |
 
-It holds `accounts.toml`, `settings.toml`, and `tuimail.db`: the cache of your folders, headers and the messages you've opened, POP3 accounts' mail, and the addresses used for completing To, Cc and Bcc. Attachments you open go to its `opened/` folder. Passwords aren't in it: they're in your system's keychain. Deleting the folder starts tuimail afresh; remove the accounts with `x` first to take their passwords out of the keychain too.
+It holds `accounts.toml`, `settings.toml`, and `tuimail.db`: the cache of your folders, headers and the messages you've opened, POP3 accounts' mail, and the addresses used for completing To, Cc and Bcc. Attachments you open go to its `opened/` folder. `tuimail.log` records starts, stops, crashes and what failed, kept to about 2 MB, safe to share: an account appears only as its number, which `tuimail --check` shows. Passwords aren't in it: they're in your system's keychain. Deleting the folder starts tuimail afresh; remove the accounts with `x` first to take their passwords out of the keychain too.
 
 | Variable | Use |
 | --- | --- |

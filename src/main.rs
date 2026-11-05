@@ -9,6 +9,7 @@ mod icons;
 mod imap;
 #[cfg(test)]
 mod live;
+mod logfile;
 mod mail;
 mod mcp;
 mod net;
@@ -97,12 +98,16 @@ async fn run() -> Result<()> {
     if check {
         return print_check(&config, &accounts, &warnings, keychain);
     }
-    let store = store::Store::open(&config.data_dir.join("tuimail.db"))?;
+    let unlogged = logfile::open(&config.data_dir, accounts.len()).err();
+    let store = store::Store::open(&config.data_dir.join("tuimail.db"))
+        .inspect_err(|e| logfile::failed("opening the cache", None, e))?;
 
     // Password commands run now, with the terminal, so one that needs to
-    // be unlocked (gpg, a password manager) can ask.
+    // be unlocked (gpg, a password manager) can ask. What fails is said
+    // once the app is up: printed here, it'd be under the full screen.
+    let mut notes = Vec::new();
     let mut passwords = HashMap::new();
-    for account in &accounts {
+    for (i, account) in accounts.iter().enumerate() {
         let command = account.password == PasswordFrom::Command
             || (account.auth == Auth::Oauth2 && !oauth::built_in(account));
         if command {
@@ -111,7 +116,10 @@ async fn run() -> Result<()> {
                     passwords.insert(account.id(), secret);
                 }
                 Ok(_) => {}
-                Err(e) => eprintln!("{}: {e:#}", account.shown_name()),
+                Err(e) => {
+                    logfile::failed("running password_command", Some(i + 1), &e);
+                    notes.push(format!("{}: {e:#}", account.shown_name()));
+                }
             }
         }
     }
@@ -132,7 +140,10 @@ async fn run() -> Result<()> {
         tx,
     );
     app.agent_socket = Some(agent::socket(&config.data_dir, false));
-    let mut notes = warnings;
+    notes.extend(warnings);
+    if let Some(e) = unlogged {
+        notes.push(format!("{}: {e}", logfile::FILE));
+    }
     if !unknown_settings.is_empty() {
         notes.push(format!(
             "settings.toml: tuimail doesn't know {}, so it's ignored",
@@ -146,14 +157,20 @@ async fn run() -> Result<()> {
     drop(app);
     let _ = execute!(stdout(), DisableBracketedPaste);
     ratatui::restore();
+    if let Err(e) = &result {
+        logfile::failed("running", None, e);
+    }
+    logfile::stopped();
     result
 }
 
 /// A panic anywhere but in parsing or laying out a message (caught there)
 /// ends the app: the terminal is put back, then the message is printed
-/// without control characters, since it can quote a message.
+/// without control characters, since it can quote a message. For the same
+/// reason the log gets only where it happened.
 pub fn panic_hook() {
     std::panic::set_hook(Box::new(|info| {
+        logfile::panicked(info.location(), mail::panic_is_contained());
         if mail::panic_is_contained() {
             return;
         }
@@ -172,9 +189,10 @@ fn print_check(
     keychain: bool,
 ) -> Result<()> {
     let mut out = format!(
-        "tuimail {}\ndata folder  {}\nkeychain     {}\n",
+        "tuimail {}\ndata folder  {}\nlog          {}\nkeychain     {}\n",
         env!("CARGO_PKG_VERSION"),
         config::shown(&config.data_dir),
+        config::shown(&config.data_dir.join(logfile::FILE)),
         if keychain {
             "the system's"
         } else {
@@ -184,7 +202,7 @@ fn print_check(
     if accounts.is_empty() {
         out.push_str("accounts     none yet: start tuimail to add one\n");
     }
-    for a in accounts {
+    for (i, a) in accounts.iter().enumerate() {
         let protocol = match a.protocol {
             account::Protocol::Imap => "IMAP",
             account::Protocol::Pop3 => "POP3",
@@ -205,7 +223,8 @@ fn print_check(
             (_, PasswordFrom::Command) => "password_command",
         };
         out.push_str(&format!(
-            "account      {} <{}>\n             {protocol} {}:{} ({:?}), sending {}:{} ({:?}), password: {password}\n",
+            "account {:<4} {} <{}>\n             {protocol} {}:{} ({:?}), sending {}:{} ({:?}), password: {password}\n",
+            i + 1,
             a.shown_name(),
             text::one_line(&a.email, 80),
             text::one_line(&a.host, 80),
@@ -267,6 +286,8 @@ Passwords are kept in the system's keychain (or asked for each start,
 or printed by a command of yours: see the README). Accounts, settings
 and a cache of your mail are kept only on this computer, in:
   {data}
+tuimail.log there says what failed and when, with no mail in it, and
+calls accounts by the numbers --check gives them.
 
 Environment:
   TM_DATA_DIR   keep them somewhere else (a full path)
