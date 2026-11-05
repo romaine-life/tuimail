@@ -129,6 +129,73 @@ jobs:
           path: target/aarch64-pc-windows-msvc/release/tuimail.exe
           if-no-files-found: error
 
+  live:
+    name: Live
+    # Jobs here share the network of the runner's own Docker, so a port published
+    # on 127.0.0.1 is reachable. Random ports keep two PRs' runs apart.
+    runs-on: [ubuntu-latest, upstairspc-linux]
+    timeout-minutes: 20
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+      - name: Start GreenMail
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]
+          greenmail="tuimail-greenmail-$GITHUB_RUN_ID"
+          echo "GREENMAIL=$greenmail" >> "$GITHUB_ENV"
+          docker run -d --name "$greenmail" \
+            -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=alice:secret@example.com,bob:secret@example.com -Dgreenmail.users.login=email' \
+            -p 127.0.0.1::3465 -p 127.0.0.1::3993 -p 127.0.0.1::3995 \
+            greenmail/standalone:2.1.3@sha256:d6db42a4fc258fec0948b1ae7b579fd06947cc92087c162ec0597972a6c36850
+          published() { docker port "$greenmail" "$1/tcp" | head -1 | sed 's/.*://'; }
+          imap=$(published 3993)
+          pop3=$(published 3995)
+          smtp=$(published 3465)
+          cert="$RUNNER_TEMP/greenmail.pem"
+          # Docker takes a connection before GreenMail does: wait for each one's TLS.
+          for port in "$smtp" "$pop3" "$imap"; do
+            for try in $(seq 60); do
+              if openssl s_client -connect "127.0.0.1:$port" </dev/null 2>/dev/null | openssl x509 > "$cert" 2>/dev/null; then
+                break
+              fi
+              test "$try" != 60
+              sleep 1
+            done
+          done
+          {
+            echo "TM_LIVE_CERT=$cert"
+            echo "TM_LIVE_IMAP_PORT=$imap"
+            echo "TM_LIVE_POP3_PORT=$pop3"
+            echo "TM_LIVE_SMTP_PORT=$smtp"
+          } >> "$GITHUB_ENV"
+      - name: Tests against GreenMail
+        shell: bash
+        run: |
+          cargo test --locked -- --ignored live:: --test-threads=1
+      # Weekly only: it needs Microsoft and Google up, which no merge should wait on.
+      - name: Tests against the sign-in providers
+        if: github.event_name == 'schedule'
+        shell: bash
+        run: cargo test --locked -- --ignored live_oauth
+      - name: GreenMail's log
+        if: failure()
+        shell: bash
+        run: docker logs --tail 80 "$GREENMAIL"
+      - name: Remove GreenMail
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${GREENMAIL:-}" ]; then
+            docker rm -f "$GREENMAIL"
+          fi
+
   windows:
     name: Windows
     needs: linux
@@ -339,7 +406,7 @@ jobs:
 
   release:
     name: Release
-    needs: [linux, windows, macos]
+    needs: [linux, live, windows, macos]
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: windows-latest
     timeout-minutes: 10

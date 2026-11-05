@@ -7,8 +7,11 @@
 //!   -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=alice:secret@example.com,bob:secret@example.com
 //!   -Dgreenmail.users.login=email' -p 3465:3465 -p 3993:3993 -p 3995:3995 greenmail/standalone:2.1.3
 //! echo | openssl s_client -connect localhost:3993 2>/dev/null | openssl x509 > /tmp/greenmail.pem
-//! TM_LIVE_CERT=/tmp/greenmail.pem cargo test -- --ignored live
+//! TM_LIVE_CERT=/tmp/greenmail.pem cargo test -- --ignored live:: --test-threads=1
 //! ```
+//!
+//! One at a time, since they share alice's and bob's mail. CI's Live job
+//! runs them the same way, on the ports `TM_LIVE_*_PORT` name.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -28,6 +31,15 @@ fn cert() -> PathBuf {
     PathBuf::from(std::env::var("TM_LIVE_CERT").expect("TM_LIVE_CERT: GreenMail's certificate"))
 }
 
+/// `usual`, unless GreenMail is published elsewhere, as it is in CI.
+fn port(name: &str, usual: u16) -> u16 {
+    std::env::var(name).map_or(usual, |port| port.parse().expect(name))
+}
+
+fn imap_port() -> u16 {
+    port("TM_LIVE_IMAP_PORT", 3993)
+}
+
 fn account(user: &str, protocol: Protocol) -> Account {
     Account {
         name: user.into(),
@@ -36,13 +48,13 @@ fn account(user: &str, protocol: Protocol) -> Account {
         protocol,
         host: "localhost".into(),
         port: Some(if protocol == Protocol::Imap {
-            3993
+            imap_port()
         } else {
-            3995
+            port("TM_LIVE_POP3_PORT", 3995)
         }),
         security: Security::Tls,
         smtp_host: "localhost".into(),
-        smtp_port: Some(3465),
+        smtp_port: Some(port("TM_LIVE_SMTP_PORT", 3465)),
         smtp_security: Security::Tls,
         certificate: Some(cert()),
         ..Account::default()
@@ -620,7 +632,7 @@ impl Proxy {
 #[ignore]
 async fn live_a_change_made_offline_reaches_the_server_once_back() {
     let (alice, _alice_events) = start(account("alice", Protocol::Imap)).await;
-    let proxy = Proxy::start(3993).await;
+    let proxy = Proxy::start(imap_port()).await;
     let mut through = account("bob", Protocol::Imap);
     through.port = Some(proxy.port);
     let (bob, mut events) = start(through).await;

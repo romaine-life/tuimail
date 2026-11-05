@@ -10,14 +10,14 @@ This is a personal fork of erictran308/tuimail (remote `upstream`, push disabled
 
 The data folder holds the user's accounts, a cache of their mail, and (through the keychain) their passwords: don't run the app against it to check a change. Verify with tests that render into ratatui's `TestBackend` (`ui/` tests, `app::tests::app()` gives an app with the demo's mail and no network). `tuimail --demo` (`demo.rs`) runs the real UI on made-up accounts and mail in an in-memory store with `App.demo` set: nothing connects or is sent (sending files the copy in Sent). Use a separate data folder for trying things against a server: `TM_DATA_DIR=$HOME/tm-test cargo run` (a full path; relative paths are refused). `docs/hero.png` is one frame of the demo: `cargo test -- --ignored export_hero_screen` writes `target/hero/screen.json` (each cell's character, colors and style), and `tools/hero.py` draws it as Ghostty would (JetBrains Mono, Nerd Font icons, box lines drawn to the cell edges), as tuitube's.
 
-Tests against a real server are `#[ignore]`d and named `live_*` (`src/live.rs`): they run against GreenMail in Docker (IMAP, POP3 and SMTP over TLS with its own certificate, trusted through an account's `certificate`); the commands are at the top of `live.rs`. `cargo test -- --ignored live` with `TM_LIVE_CERT` set.
+Tests against a real server are `#[ignore]`d and named `live_*` (`src/live.rs`): they run against GreenMail in Docker (IMAP, POP3 and SMTP over TLS with its own certificate, trusted through an account's `certificate`); the commands are at the top of `live.rs`. `cargo test -- --ignored live:: --test-threads=1` with `TM_LIVE_CERT` set, one at a time since they share mailboxes. CI's Live job runs them on every PR and push (nelsonpc has no Docker, so this is the only place they run). `oauth::tests::live_oauth_*` asks the real providers, so CI runs it only in the weekly run.
 
 ## Commands
 
 ```sh
 cargo build
 cargo test                       # offline tests
-TM_LIVE_CERT=/tmp/greenmail.pem cargo test -- --ignored live
+TM_LIVE_CERT=/tmp/greenmail.pem cargo test -- --ignored live:: --test-threads=1
 cargo clippy --all-targets       # keep it warning-free
 cargo fmt
 cargo run -- --demo
@@ -25,7 +25,7 @@ cargo run -- --demo
 
 ## Releasing
 
-`.forgejo/workflows/ci.yml` runs fmt, clippy (`-D warnings`), offline tests and the advisory audit. Its Linux job cross-builds both Linux architectures with a glibc 2.35 floor and Windows ARM64. Its Windows job tests natively, builds x64, signs both Windows executables, and packages them. `.github/workflows/macos.yml` checks and builds both Mac architectures; Forgejo requires its successful GitHub push run on the exact source SHA and downloads that run's archives. Before push-mirror cutover, the migration operator pushes that exact SHA to a temporary GitHub branch to start the Mac run.
+`.forgejo/workflows/ci.yml` runs fmt, clippy (`-D warnings`), offline tests, the advisory audit and the tests against GreenMail (the Live job, on the Linux runner's Docker; required, and a release needs it). Its Linux job cross-builds both Linux architectures with a glibc 2.35 floor and Windows ARM64. Its Windows job tests natively, builds x64, signs both Windows executables, and packages them. `.github/workflows/macos.yml` checks and builds both Mac architectures; Forgejo requires its successful GitHub push run on the exact source SHA and downloads that run's archives. Before push-mirror cutover, the migration operator pushes that exact SHA to a temporary GitHub branch to start the Mac run.
 
 Bump `version` in Cargo.toml and this package's entry in Cargo.lock, then open a Forgejo PR. After all checks pass, merging to `main` creates the matching `vX.Y.Z` Forgejo release with all six archives and `SHA256SUMS`. A manual CI run on `main` can retry publication; an already published version remains immutable. Later source changes without a version bump still run all checks but do not replace that release. Install with the authenticated release-download commands in README.md: Forgejo requires authentication even for public repository releases. Read the stored credential with `git credential fill`, pass it through curl's `--header @-` stdin or PowerShell's in-process headers, and never put the token on a command line. Cargo metadata points to Forgejo, but a local manifest alone does not authenticate cargo-binstall. This personal fork is not published to crates.io and does not claim GitHub provenance attestations for Forgejo builds. Never build on nelsonpc or fall back to a local Rust build when downloading fails; use the CI runners.
 
