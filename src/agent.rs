@@ -285,6 +285,7 @@ mod other {
 
     use super::*;
     use crate::app::AppEvent;
+    use crate::logfile::Class;
 
     pub struct Listener;
 
@@ -292,8 +293,10 @@ mod other {
         bail!("AI agents can't reach tuimail on Windows yet")
     }
 
-    pub async fn ask(_: &Path, _: &Request) -> Answer {
-        Err("tuimail mcp isn't available on Windows yet".into())
+    pub async fn ask(_: &Path, _: &Request) -> Result<Answer> {
+        Err(Class::Agent("not-listening")
+            .with("tuimail mcp isn't available on Windows yet")
+            .into())
     }
 }
 
@@ -310,6 +313,7 @@ mod unix {
 
     use super::*;
     use crate::app::AppEvent;
+    use crate::logfile::Class;
 
     /// The longest request read, and answer.
     pub const MAX_REQUEST: usize = 64 << 10;
@@ -477,38 +481,37 @@ mod unix {
     /// Asks the tuimail listening at `path` (`tuimail mcp`'s side): only a
     /// socket of this user's, not through a link, and only a listener of
     /// this user's, since what it answers goes to the agent as the user's
-    /// mail.
-    pub async fn ask(path: &Path, request: &Request) -> Answer {
+    /// mail. An error is why tuimail gave no answer: its text is the
+    /// agent's, and its class the log's.
+    pub async fn ask(path: &Path, request: &Request) -> Result<Answer> {
         if identity(path).is_none() {
-            return Err(NOT_LISTENING.to_string());
+            return Err(Class::Agent("not-listening").with(NOT_LISTENING).into());
         }
-        let mut stream = UnixStream::connect(path)
-            .await
-            .map_err(|_| NOT_LISTENING.to_string())?;
+        let mut stream = UnixStream::connect(path).await.context(NOT_LISTENING)?;
         // SAFETY: geteuid has no preconditions.
         let me = unsafe { libc::geteuid() };
         if !stream.peer_cred().is_ok_and(|c| c.uid() == me) {
-            return Err("what answers at tuimail's socket isn't yours: not asked".into());
+            return Err(Class::Agent("not-yours")
+                .with("what answers at tuimail's socket isn't yours: not asked")
+                .into());
         }
-        let mut out = serde_json::to_vec(request).map_err(|e| e.to_string())?;
+        let mut out = serde_json::to_vec(request)?;
         if out.len() >= MAX_REQUEST {
-            return Err("the request is too long".into());
+            return Err(Class::Agent("too-long")
+                .with("the request is too long")
+                .into());
         }
         out.push(b'\n');
-        stream
-            .write_all(&out)
-            .await
-            .map_err(|_| NOT_LISTENING.to_string())?;
+        stream.write_all(&out).await.context(NOT_LISTENING)?;
         let mut line = Vec::new();
         let mut reader = BufReader::new(stream.take(MAX_ANSWER as u64 + 2));
         tokio::time::timeout(ANSWER_WITHIN, reader.read_until(b'\n', &mut line))
             .await
-            .map_err(|_| "tuimail didn't answer in time".to_string())?
-            .map_err(|e| e.to_string())?;
+            .context("tuimail didn't answer in time")??;
         match serde_json::from_slice::<Wire>(&line) {
-            Ok(Wire::Ok(value)) => Ok(value),
-            Ok(Wire::Error(error)) => Err(error),
-            Err(_) => Err("tuimail's answer didn't read".into()),
+            Ok(Wire::Ok(value)) => Ok(Ok(value)),
+            Ok(Wire::Error(error)) => Ok(Err(error)),
+            Err(_) => Err(Class::Protocol.with("tuimail's answer didn't read").into()),
         }
     }
 }

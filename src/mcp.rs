@@ -3,17 +3,21 @@
 //! holds nothing and decides nothing: each tool is a request to the running
 //! tuimail (`agent.rs`), which checks it, asks the user unless told not to,
 //! makes it as the user's keys would, and answers. Nothing but MCP goes to
-//! stdout.
+//! stdout. What fails goes to `tuimail.log`, as tuimail's does, with no
+//! `start` line: an agent starts one of these for each session.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
 use rmcp::service::RequestContext;
+use rmcp::transport::IntoTransport;
 use rmcp::{RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 
 use crate::agent::{self, Call};
+use crate::{logfile, text};
 
 /// What every agent is told about this server (Claude Code reads up to
 /// 2,048 characters of it). The rules are tuimail's, kept by it whatever
@@ -35,15 +39,43 @@ Ids stop working when a folder changes: search again.";
 #[derive(Clone)]
 struct Mail {
     socket: PathBuf,
+    /// Whether tuimail last answered: a call made while it's closed fails
+    /// as the last one did, and needn't be written again.
+    link: Arc<Mutex<logfile::Link>>,
 }
 
 impl Mail {
+    fn new(socket: PathBuf) -> Self {
+        Self {
+            socket,
+            link: Arc::new(Mutex::new(logfile::Link::unnumbered())),
+        }
+    }
+
     async fn ask(&self, context: &RequestContext<RoleServer>, call: Call) -> CallToolResult {
         let client = context
             .client_info()
             .map(|info| info.title.unwrap_or(info.name))
             .unwrap_or_default();
-        match agent::ask(&self.socket, &agent::Request { client, call }).await {
+        self.answer(client, call).await
+    }
+
+    async fn answer(&self, client: String, call: Call) -> CallToolResult {
+        let asked = agent::ask(&self.socket, &agent::Request { client, call }).await;
+        let answer = {
+            let mut link = self.link.lock().unwrap_or_else(|e| e.into_inner());
+            match asked {
+                Ok(answer) => {
+                    link.back();
+                    answer
+                }
+                Err(error) => {
+                    link.failed("asking tuimail", &error);
+                    Err(error.to_string())
+                }
+            }
+        };
+        match answer {
             Ok(value) => {
                 let text = serde_json::to_string_pretty(&value).unwrap_or_default();
                 CallToolResult::success(vec![ContentBlock::text(text)])
@@ -274,22 +306,168 @@ impl ServerHandler for Mail {
     }
 }
 
+/// A panic ends this as it ends tuimail, or the agent would wait for ever
+/// for the call it was answering. Unlike tuimail's, it leaves stdout alone,
+/// and the log gets only where it happened.
+fn panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        logfile::panicked(info.location(), false);
+        eprintln!("tuimail mcp crashed: {}", text::clean(&info.to_string()));
+        std::process::exit(101);
+    }));
+}
+
+/// The log, but for the agents of `tuimail --demo`, which writes none.
+fn open_log(data_dir: &Path, demo: bool) {
+    if !demo && let Err(error) = logfile::join(data_dir) {
+        eprintln!("{}: {error}", logfile::FILE);
+    }
+}
+
+async fn serve<T, E, A>(mail: Mail, transport: T) -> Result<()>
+where
+    T: IntoTransport<RoleServer, E, A>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    mail.serve(transport).await?.waiting().await?;
+    Ok(())
+}
+
 /// Serves MCP on stdin and stdout until the agent closes them; with
 /// `demo`, for `tuimail --demo`.
 pub async fn run(data_dir: PathBuf, demo: bool) -> Result<()> {
-    let mail = Mail {
-        socket: agent::socket(&data_dir, demo),
-    };
-    mail.serve(rmcp::transport::stdio())
-        .await?
-        .waiting()
-        .await?;
-    Ok(())
+    open_log(&data_dir, demo);
+    panic_hook();
+    let mail = Mail::new(agent::socket(&data_dir, demo));
+    serve(mail, rmcp::transport::stdio())
+        .await
+        .inspect_err(|e| logfile::failed("serving an agent", None, e))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logfile::tests::{
+        assert_nothing_private_in, child_dir, log_of_child, private_words,
+    };
+
+    fn events(log: &str) -> Vec<&str> {
+        log.lines().map(|l| l.split_once(' ').unwrap().1).collect()
+    }
+
+    /// No tuimail to ask: the agent gets the reason each time, and the log
+    /// gets it once, without who asked or what about.
+    #[tokio::test]
+    async fn a_call_nothing_answers_is_logged_once_with_nothing_of_it() {
+        let Some(dir) = child_dir() else {
+            let (run, log) = log_of_child(
+                "mcp::tests::a_call_nothing_answers_is_logged_once_with_nothing_of_it",
+            );
+            assert!(run.status.success(), "{run:?}");
+            assert_eq!(
+                events(&log),
+                ["failed op=\"asking tuimail\" class=agent kind=not-listening"],
+                "{log}"
+            );
+            assert_nothing_private_in(&log);
+            return;
+        };
+        logfile::join(&dir).unwrap();
+        let mail = Mail::new(agent::socket(&dir, false));
+        for _ in 0..3 {
+            let call = Call::ListFolders(agent::FolderArgs {
+                account: private_words(),
+            });
+            let answer = mail.answer(private_words(), call).await;
+            assert_eq!(answer.is_error, Some(true));
+        }
+    }
+
+    /// tuimail's refusal is an answer: it ends a failure and isn't one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_answer_that_doesnt_read_is_logged_until_one_does() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let Some(dir) = child_dir() else {
+            let (run, log) =
+                log_of_child("mcp::tests::an_answer_that_doesnt_read_is_logged_until_one_does");
+            assert!(run.status.success(), "{run:?}");
+            assert_eq!(
+                events(&log),
+                ["failed op=\"asking tuimail\" class=protocol", "recovered"],
+                "{log}"
+            );
+            return;
+        };
+        logfile::join(&dir).unwrap();
+        let socket = agent::socket(&dir, false);
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            for answer in ["what?\n", "{\"error\":\"no\"}\n", "{\"ok\":[]}\n"] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(read).read_line(&mut line).await.unwrap();
+                write.write_all(answer.as_bytes()).await.unwrap();
+            }
+        });
+        let mail = Mail::new(socket);
+        let mut failed = Vec::new();
+        for _ in 0..3 {
+            let call = Call::ListAccounts(agent::NoArgs {});
+            let answer = mail.answer("Claude Code".into(), call).await;
+            failed.push(answer.is_error);
+        }
+        assert_eq!(failed, [Some(true), Some(true), Some(false)]);
+    }
+
+    #[tokio::test]
+    async fn an_agent_gone_before_it_starts_is_logged() {
+        let Some(dir) = child_dir() else {
+            let (run, log) = log_of_child("mcp::tests::an_agent_gone_before_it_starts_is_logged");
+            assert!(run.status.success(), "{run:?}");
+            assert_eq!(
+                events(&log),
+                ["failed op=\"serving an agent\" class=connection-lost"],
+                "{log}"
+            );
+            return;
+        };
+        logfile::join(&dir).unwrap();
+        let (ours, theirs) = tokio::io::duplex(64);
+        drop(theirs);
+        let mail = Mail::new(agent::socket(&dir, false));
+        let served = serve(mail, tokio::io::split(ours)).await;
+        logfile::failed("serving an agent", None, &served.unwrap_err());
+    }
+
+    #[test]
+    fn a_crash_says_where_and_leaves_stdout_to_the_agent() {
+        if let Some(dir) = child_dir() {
+            logfile::join(&dir).unwrap();
+            panic_hook();
+            let parsed: Result<(), String> = Err(private_words());
+            std::hint::black_box(parsed).unwrap();
+        }
+        let (run, log) =
+            log_of_child("mcp::tests::a_crash_says_where_and_leaves_stdout_to_the_agent");
+        assert_eq!(run.status.code(), Some(101), "{run:?}");
+        assert!(events(&log)[0].starts_with("crash at=src/mcp.rs"), "{log}");
+        assert_nothing_private_in(&log);
+        assert!(!run.stdout.contains(&0x1b), "{run:?}");
+    }
+
+    #[test]
+    fn the_demos_agents_write_nothing() {
+        if let Some(dir) = child_dir() {
+            open_log(&dir, true);
+            logfile::failed("x", None, &anyhow::anyhow!("y"));
+            return;
+        }
+        let (run, log) = log_of_child("mcp::tests::the_demos_agents_write_nothing");
+        assert!(run.status.success(), "{run:?}");
+        assert_eq!(log, "");
+    }
 
     #[test]
     fn the_instructions_fit_what_agents_read() {

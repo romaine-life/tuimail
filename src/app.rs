@@ -7636,13 +7636,13 @@ pub mod tests {
             tokio::spawn(async move { agent::ask(&socket, &request).await })
         };
         app.wait_until(|_| asked.is_finished()).await;
-        let accounts = asked.await.unwrap().unwrap();
+        let accounts = asked.await.unwrap().unwrap().unwrap();
         assert_eq!(accounts[0]["address"], app.accounts[0].id.as_str());
         app.settings.agents = false;
         app.listen_for_agents();
         assert!(!socket.exists(), "the socket goes");
         assert_eq!(
-            agent::ask(&socket, &request).await.unwrap_err(),
+            agent::ask(&socket, &request).await.unwrap_err().to_string(),
             agent::NOT_LISTENING
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -7673,7 +7673,7 @@ pub mod tests {
             let (socket, request) = (socket.to_path_buf(), request.clone());
             let asked = tokio::spawn(async move { agent::ask(&socket, &request).await });
             app.wait_until(|_| asked.is_finished()).await;
-            asked.await.unwrap()
+            asked.await.unwrap().unwrap()
         }
         assert!(ask(&mut app, &socket, &request).await.is_ok());
         // Another tuimail (or a hand edit) turns them off.

@@ -6,7 +6,8 @@
 //! static words and numbers. An account is its place in `accounts.toml`,
 //! since its name can be its address.
 //!
-//! Nothing is written until [`open`], which the demo and tests don't call.
+//! Nothing is written until [`open`] or [`join`], which the demos and tests
+//! don't call.
 
 use std::error::Error;
 use std::fmt;
@@ -16,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use chrono::{Local, SecondsFormat};
+use rmcp::service::ServerInitializeError;
 
 use crate::{imap, oauth, pop3, secrets, smtp};
 
@@ -48,6 +50,9 @@ pub enum Class {
     Smtp(u16),
     /// The server isn't speaking its protocol.
     Protocol,
+    /// `tuimail mcp` got no answer: `not-listening`, `not-yours` (what
+    /// answers at the socket is another user's) or `too-long`.
+    Agent(&'static str),
     Keychain,
     /// SQLite's extended result code.
     Store(Option<i32>),
@@ -82,6 +87,7 @@ impl fmt::Display for Class {
             Class::ServerRefused(Some(code)) => write!(f, "class=server-refused code={code}"),
             Class::Smtp(code) => write!(f, "class=smtp code={code}"),
             Class::Protocol => f.write_str("class=protocol"),
+            Class::Agent(kind) => write!(f, "class=agent kind={kind}"),
             Class::Keychain => f.write_str("class=keychain"),
             Class::Store(None) => f.write_str("class=store"),
             Class::Store(Some(code)) => write!(f, "class=store sqlite={code}"),
@@ -198,6 +204,14 @@ fn class_of_one(error: &(dyn Error + 'static)) -> Option<Class> {
             Imap::Validate(_) | Imap::Append => Class::ServerRefused(None),
             _ => Class::Other,
         })
+    } else if let Some(start) = error.downcast_ref::<ServerInitializeError>() {
+        Some(match start {
+            ServerInitializeError::ConnectionClosed(_)
+            | ServerInitializeError::TransportError { .. } => Class::ConnectionLost,
+            ServerInitializeError::ExpectedInitializeRequest(_)
+            | ServerInitializeError::UnexpectedInitializeResponse(_) => Class::Protocol,
+            _ => Class::Other,
+        })
     } else if let Some(io) = error.downcast_ref() {
         Some(io_class(io))
     } else {
@@ -230,14 +244,9 @@ fn source_file(file: &str) -> String {
     short.unwrap_or(file)
 }
 
-/// Adds `text` as one line, with the time and its zone, and closes the
-/// file, which is what tells whoever's watching it.
-fn append(path: &Path, text: &str) -> std::io::Result<()> {
-    if std::fs::metadata(path).is_ok_and(|meta| meta.len() > MAX_SIZE) {
-        // Another tuimail may have got here first, or be writing.
-        let _ = std::fs::rename(path, path.with_file_name(OLD_FILE));
-    }
-    let now = Local::now().to_rfc3339_opts(SecondsFormat::Millis, false);
+/// How the log is opened: added to, made if it's not there, and only by
+/// this user.
+fn adding() -> std::fs::OpenOptions {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
@@ -246,6 +255,17 @@ fn append(path: &Path, text: &str) -> std::io::Result<()> {
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     options
+}
+
+/// Adds `text` as one line, with the time and its zone, and closes the
+/// file, which is what tells whoever's watching it.
+fn append(path: &Path, text: &str) -> std::io::Result<()> {
+    if std::fs::metadata(path).is_ok_and(|meta| meta.len() > MAX_SIZE) {
+        // Another tuimail may have got here first, or be writing.
+        let _ = std::fs::rename(path, path.with_file_name(OLD_FILE));
+    }
+    let now = Local::now().to_rfc3339_opts(SecondsFormat::Millis, false);
+    adding()
         .open(path)?
         .write_all(format!("{now} {text}\n").as_bytes())
 }
@@ -265,6 +285,16 @@ pub fn open(data_dir: &Path, accounts: usize) -> std::io::Result<()> {
         env!("CARGO_PKG_VERSION")
     );
     append(&path, &start)?;
+    let _ = LOG.set(path);
+    Ok(())
+}
+
+/// Starts the log in `data_dir` without a word: for `tuimail mcp`, which an
+/// agent starts for each session, so that its coming and going would be most
+/// of the log. An error means it can't be written.
+pub fn join(data_dir: &Path) -> std::io::Result<()> {
+    let path = data_dir.join(FILE);
+    adding().open(&path)?;
     let _ = LOG.set(path);
     Ok(())
 }
@@ -304,18 +334,26 @@ pub fn panicked(location: Option<&Location>, contained: bool) {
     }
 }
 
-/// One connection's account: a failure that keeps coming back, as a retry
-/// every half a minute does while offline, is written once, and when it
-/// ends.
+/// One connection, and its account if it has one: a failure that keeps
+/// coming back, as a retry every half a minute does while offline, is
+/// written once, and when it ends.
 pub struct Link {
-    account: usize,
+    account: Option<usize>,
     down: Option<Class>,
 }
 
 impl Link {
     pub fn new(account: usize) -> Self {
         Self {
-            account,
+            account: Some(account),
+            down: None,
+        }
+    }
+
+    /// A connection that's no account's: `tuimail mcp`'s to tuimail.
+    pub fn unnumbered() -> Self {
+        Self {
+            account: None,
             down: None,
         }
     }
@@ -324,13 +362,16 @@ impl Link {
         let class = class_of(error);
         if self.down != Some(class) {
             self.down = Some(class);
-            write(&failure(op, Some(self.account), class));
+            write(&failure(op, self.account, class));
         }
     }
 
     pub fn back(&mut self) {
         if self.down.take().is_some() {
-            write(&format!("recovered account={}", self.account));
+            match self.account {
+                Some(account) => write(&format!("recovered account={account}")),
+                None => write("recovered"),
+            }
         }
     }
 }
@@ -421,6 +462,15 @@ pub mod tests {
                 anyhow!(Class::Timeout.with("x")).context(words.clone()),
                 Class::Timeout,
             ),
+            (
+                anyhow!(ServerInitializeError::ConnectionClosed(words.clone())),
+                Class::ConnectionLost,
+            ),
+            (
+                anyhow!(ServerInitializeError::ExpectedInitializeRequest(None))
+                    .context(words.clone()),
+                Class::Protocol,
+            ),
         ] {
             assert_kept_out(&error, class);
         }
@@ -509,6 +559,21 @@ pub mod tests {
     }
 
     #[test]
+    fn joining_says_nothing_and_later_lines_are_written() {
+        if let Some(dir) = child_dir() {
+            join(&dir).unwrap();
+            assert_eq!(std::fs::metadata(dir.join(FILE)).unwrap().len(), 0);
+            failed("x", None, &anyhow!("y"));
+            return;
+        }
+        let (run, log) =
+            log_of_child("logfile::tests::joining_says_nothing_and_later_lines_are_written");
+        assert!(run.status.success(), "{run:?}");
+        let events: Vec<_> = log.lines().map(|l| l.split_once(' ').unwrap().1).collect();
+        assert_eq!(events, ["failed op=\"x\" class=other"], "{log}");
+    }
+
+    #[test]
     fn a_panic_in_a_dependency_is_placed_without_the_builds_folders() {
         let built_at =
             r"C:\Users\me\.cargo\registry\src\index.crates.io-1\html2text-0.17\src\lib.rs";
@@ -532,7 +597,8 @@ pub mod tests {
             .env(CHILD, &dir)
             .output()
             .unwrap();
-        (run, std::fs::read_to_string(dir.join(FILE)).unwrap())
+        let log = std::fs::read_to_string(dir.join(FILE)).unwrap_or_default();
+        (run, log)
     }
 
     pub fn assert_nothing_private_in(log: &str) {
