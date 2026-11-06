@@ -1,9 +1,11 @@
 name: CI
 
 # The full build. It runs only when Nelson says so, by pushing to `release`.
+# A dropped or failed run has no new commit to push: dispatch it on `release`.
 on:
   push:
     branches: [release]
+  workflow_dispatch:
 
 permissions:
   contents: write
