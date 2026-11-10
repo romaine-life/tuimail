@@ -28,13 +28,14 @@ This is Nelson's fork of [erictran308/tuimail](https://github.com/erictran308/tu
 - **IMAP, POP3 and SMTP.** IMAP accounts keep mail on the server, in its folders; POP3 accounts download the inbox and keep Sent, Drafts, Archive and Trash on your computer. Both send through SMTP, with TLS or STARTTLS.
 - **New mail at once.** Where the server can (IMAP IDLE), new mail shows the moment it arrives, with a notification through your terminal. Elsewhere tuimail checks every few minutes, and `R` checks now.
 - **Several accounts.** Each in the sidebar with its folders, and **All inboxes** together at the top. Write from any of them (`←` `→` on From).
+- **Every command a search away.** `/` opens the command palette: type part of what you want ("archive", "reply to all", "check for mail") and `Enter` runs it. Every key has a command there, and one that can't run where you are says why.
 - **Arrows or vim, your choice.** `←↓↑→` and `h j k l` both move, `Enter` opens, `gg` / `G`, `Ctrl-d` / `Ctrl-u`. `?` lists every key, and `O` opens the settings.
 - **Reading made calm.** HTML mail is shown as text (bold, italics, links numbered), with nothing it points to fetched: no tracking pixels, no "read" receipts by image. Quotes are colored by depth. `H` shows the plain-text part instead, `o` lists the links, `A` the attachments.
 - **Writing in place, or in your editor.** To, Cc, Bcc and Subject with addresses completed from people you've written to or heard from; the text in place, or `Ctrl-e` for `$EDITOR`. Drop a file on the window to attach it. Replies quote, forwards carry the attachments, drafts go to Drafts and open again where you left them.
 - **Quick to tidy.** `d` deletes (to Trash), `e` archives, `!` marks junk, `m` moves anywhere, `s` stars, `u` marks read or unread, `t` tags. `Space` marks several messages for any of these at once, and `z` undoes the last of them (`Z` lists them, to undo any). `U` unsubscribes from a mailing list.
 - **Conversations.** Replies sit under what they answer, the conversation with the newest message first, so a thread reads top to bottom. They're worked out from the messages themselves, the same for every server and POP3; turn them off in the settings (`O`) for a plain newest-first list.
 - **Tags.** Put `work`, `receipts` or any word on a message with `t`. IMAP accounts keep them on the server as keywords, spelled the way Thunderbird spells its tags, so the two show each other's; POP3 accounts keep them on your computer. (Gmail keeps them too, but its website shows only its labels.)
-- **Search.** `/` finds mail by sender, recipients, subject or text: at once in what's on your computer, then on the server, which searches whole messages. `tag:work` finds what's tagged.
+- **Search.** `/`, then `search` and `Enter`, finds mail by sender, recipients, subject or text: at once in what's on your computer, then on the server, which searches whole messages. `tag:work` finds what's tagged.
 - **AI agents, on your terms.** Claude Code, Claude Desktop, Cursor or any MCP client can read and sort your mail through `tuimail mcp`: mark, star, tag, move, mark spam, move to Trash. Each change asks you first (unless you say not to), shows on the screen and undoes with `z`. Agents can't delete anything for good, send, or open links.
 - **Works offline.** Headers and the messages you've opened are kept in a local cache, so the list and what you've read are there without a connection.
 - **Set up in a minute.** Type your address and password: the servers fill in for Gmail, iCloud, Outlook, Yahoo, Fastmail, Proton (through its Bridge), Zoho, GMX, WEB.DE, Yandex, Mail.ru, Posteo, mailbox.org and more, or are guessed for others. tuimail logs in to check before saving.
@@ -122,7 +123,16 @@ It says where your data folder is, whether a keychain is there for passwords, an
 
 ## Keys
 
-The status bar shows the keys for where you are, and `?` lists them all. `Tab` there goes to the settings.
+The status bar shows the keys for where you are, and `?` lists them all, each with the name the command palette finds it by. `Tab` there goes to the settings.
+
+### Command palette
+
+`/` opens it (`Ctrl-p` while writing, where `/` is text). Type to find a command, `Enter` to run it; `→` and `←` go into and out of its folders, and `Esc` clears what's typed, leaves a folder, then closes it. Every key below has a command, which does exactly what the key does where you are. One that can't run there is listed after the rest with the reason, which shows again if you pick it.
+
+- **Search:** `/`, type `search`, `Enter`, then the words.
+- **Info:** `/`, type `info`, `Enter`: this build's repo and link, its version and commit, when it was built, where it's installed and its checkout under `D:\repos`.
+
+The palette is [fzt](https://forgejo.romaine.life/romaine-life/fzt-terminal), loaded from its install (`C:\Program Files\at-home\fzt\current\fzt.dll`, put there by home-sync on the Windows home PCs). Without it, `/` says why it couldn't open; every key still works.
 
 | Key | Action |
 | --- | --- |
@@ -137,7 +147,7 @@ The status bar shows the keys for where you are, and `?` lists them all. `Tab` t
 | `t` | Tag: put a tag on or take it off, or type a new one |
 | `z` / `Z` | Undo the last change (a star, read, tag or move) / list the changes, to undo any |
 | `Space` / `*` | Mark a message / all of them; the keys above act on the marked |
-| `/` | Search; `Esc` ends it |
+| `/` | The command palette; `/` `search` `Enter` searches, and `Esc` ends the search |
 | `J` / `K` | Reading: the next / previous message |
 | `Space` / `b` | Reading: a page down / up |
 | `o` / `A` | Reading: the links (`Enter` open, `y` copy) / attachments (`Enter` open, `s` save) |

@@ -24,13 +24,14 @@ use crate::imap::FlagKind;
 use crate::logfile::{self, stored};
 use crate::mail::{self, Addr, Body, Parsed};
 use crate::notify::{self, Notifications, Notifier};
+use crate::palette::{self, Palette, Run};
 use crate::secrets::{Credentials, Secret};
 use crate::settings::Settings;
 use crate::setup::{self, Setup};
 use crate::store::{self, Change, Changed, Flags, Folder, Known, Message, Role, Store, What};
 use crate::theme::{self, Colors};
 use crate::worker::{self, Endpoints, Request, State, Worker};
-use crate::{net, tags, text, tools};
+use crate::{fzt, info, net, tags, text, tools};
 
 /// The longest search or path typed or pasted, in characters.
 const MAX_PROMPT: usize = 4096;
@@ -587,6 +588,10 @@ pub struct App {
     /// `d`'s questions still to ask: one each account and folder.
     deletes_waiting: VecDeque<Confirm>,
     pub help: Option<HelpMenu>,
+    /// The command palette, or what it shows instead (`palette.rs`).
+    pub palette: Option<Palette>,
+    /// The palette's rows' size in this window, from the last frame.
+    pub palette_area: Cell<(u16, u16)>,
     pub status: Option<Status>,
     pending: Option<((usize, String, u32), Pending)>,
     /// Flags changed here, and when.
@@ -753,6 +758,8 @@ impl App {
             confirm_at: Instant::now(),
             deletes_waiting: VecDeque::new(),
             help: None,
+            palette: None,
+            palette_area: Cell::new((60, 20)),
             status: None,
             pending: None,
             local_flags: HashMap::new(),
@@ -921,6 +928,20 @@ impl App {
     /// After a frame: a message laid out for another width is laid out
     /// again for this one.
     pub(crate) fn after_draw(&mut self) {
+        let area = self.palette_area.get();
+        if let Some(Palette::Open {
+            session,
+            frame,
+            size,
+        }) = self.palette.as_mut()
+            && *size != area
+        {
+            *size = area;
+            match session.resize(area.0, area.1) {
+                Ok(next) => **frame = next,
+                Err(e) => self.palette_failed("resizing the command palette", &e),
+            }
+        }
         let width = self.reader_width.get();
         if let Some(reader) = &self.reader
             && reader.raw.is_some()
@@ -4531,7 +4552,10 @@ impl App {
         }
         // Under a question, keys answer it: nothing is written.
         let writing = self.confirm.is_none()
-            && (self.prompt.is_some() || self.composer.is_some() || self.setup.is_some());
+            && (self.prompt.is_some()
+                || self.composer.is_some()
+                || self.setup.is_some()
+                || matches!(self.palette, Some(Palette::Open { .. })));
         if !writing {
             if presses.len() >= PASTED_KEYS {
                 return self.info("Pasted text goes where you write: press c, / or Tab first");
@@ -4572,6 +4596,13 @@ impl App {
             // A paste never answers a question, nor changes what it's about.
             Event::Paste(_) if self.confirm.is_some() => {
                 self.info("Answer the question first: y, or any other key")
+            }
+            // Keys read together are a paste: what's typed into the palette
+            // fast comes this way too.
+            Event::Paste(pasted) if self.palette.is_some() => {
+                for c in text::one_line(&pasted, MAX_PROMPT).chars() {
+                    self.on_palette_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+                }
             }
             Event::Paste(pasted) => {
                 let pasted = text::first_chars(&pasted, 4 << 20).to_string();
@@ -4638,12 +4669,19 @@ impl App {
         if self.help.is_some() {
             return self.on_help_key(key, ctrl);
         }
+        if self.palette.is_some() {
+            return self.on_palette_key(key);
+        }
         if self.setup.is_some() {
             return self.on_setup_key(key);
         }
         if self.composer.is_some() {
             if ctrl && key.code == KeyCode::Char('c') {
                 return self.on_composer_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            }
+            // `/` is text here.
+            if ctrl && key.code == KeyCode::Char('p') {
+                return self.open_palette();
             }
             return self.on_composer_key(key);
         }
@@ -4658,11 +4696,7 @@ impl App {
                 KeyCode::Char('?') => return self.help = Some(HelpMenu::new(HelpTab::Keys)),
                 KeyCode::Char('O') => return self.help = Some(HelpMenu::new(HelpTab::Settings)),
                 KeyCode::Char('c') => return self.compose_new(),
-                KeyCode::Char('/') => {
-                    let text = self.search.clone().unwrap_or_default();
-                    self.prompt = Some(Prompt::new(PromptKind::Search, &text));
-                    return;
-                }
+                palette::KEY => return self.open_palette(),
                 KeyCode::Char('R') => {
                     for i in 0..self.accounts.len() {
                         if let Some(worker) = &self.accounts[i].worker {
@@ -4967,6 +5001,82 @@ impl App {
         });
         if let Some(at) = at {
             self.sidebar_selected = at;
+        }
+    }
+
+    /// `/`, or `Ctrl-p` while writing: fzt's search over every command,
+    /// those that can't run now saying why.
+    fn open_palette(&mut self) {
+        let size = self.palette_area.get();
+        let options = fzt::Options {
+            title: "tuimail".into(),
+            width: size.0,
+            height: size.1,
+            frontend: "tuimail".into(),
+            commands: palette::host_commands(),
+        };
+        self.palette = Some(match fzt::Session::open(&palette::menu(self), &options) {
+            Ok((session, frame)) => Palette::Open {
+                session,
+                frame: Box::new(frame),
+                size,
+            },
+            Err(e) => {
+                logfile::failed("opening the command palette", None, &e);
+                Palette::Failed(format!("{e:#}"))
+            }
+        });
+    }
+
+    fn on_palette_key(&mut self, key: KeyEvent) {
+        let Some(Palette::Open { session, frame, .. }) = self.palette.as_mut() else {
+            // It says why it couldn't open, or shows the info: any key closes it.
+            self.palette = None;
+            return;
+        };
+        let Some(press) = palette::fzt_key(key) else {
+            return;
+        };
+        match session.key(&press) {
+            Ok(next) => **frame = next,
+            Err(e) => return self.palette_failed("using the command palette", &e),
+        }
+        let Some(pick) = frame.result.take() else {
+            return;
+        };
+        self.palette = None;
+        // `select` is a menu entry; `command` one from fzt's `:` folder:
+        // fzt's own (version, whoami) answer nothing here, so only ours come.
+        if pick.kind == "select" || pick.kind == "command" {
+            self.run_command(&pick.action);
+        }
+    }
+
+    fn palette_failed(&mut self, op: &'static str, e: &anyhow::Error) {
+        logfile::failed(op, None, e);
+        self.palette = Some(Palette::Failed(format!("{e:#}")));
+    }
+
+    /// Does what the command `name` does, or says why it can't now.
+    pub fn run_command(&mut self, name: &str) {
+        let Some(command) = palette::find(name) else {
+            return;
+        };
+        if let Some(why) = command.unavailable(self) {
+            return self.error(format!("“{}” can't run now: {why}", command.name));
+        }
+        match command.run {
+            Run::Search => {
+                let text = self.search.clone().unwrap_or_default();
+                self.prompt = Some(Prompt::new(PromptKind::Search, &text));
+            }
+            Run::Info => self.palette = Some(Palette::Info(info::lines())),
+            Run::Palette => self.open_palette(),
+            Run::Keys(_) => {
+                for press in command.presses() {
+                    self.handle_key(press);
+                }
+            }
         }
     }
 
@@ -6406,7 +6516,7 @@ pub mod tests {
         let mut app = app();
         with_mail(&mut app);
         let before = app.items.len();
-        app.on_key(key(KeyCode::Char('/')));
+        app.run_command("search");
         for c in "bob q3".chars() {
             app.on_key(key(KeyCode::Char(c)));
         }

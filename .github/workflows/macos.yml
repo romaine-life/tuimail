@@ -29,6 +29,13 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+      # The palette's info panel: this commit, and when this build was made.
+      - name: Stamp the build
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "TM_COMMIT=$GITHUB_SHA" >> "$GITHUB_ENV"
+          echo "TM_BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test native Mac release build

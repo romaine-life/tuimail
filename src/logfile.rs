@@ -54,6 +54,9 @@ pub enum Class {
     /// answers at the socket is another user's) or `too-long`.
     Agent(&'static str),
     Keychain,
+    /// The command palette's fzt: `not-installed`, `not-loaded` (its
+    /// library is there but isn't fzt's), `refused` (fzt answered an error).
+    Palette(&'static str),
     /// SQLite's extended result code.
     Store(Option<i32>),
     Other,
@@ -89,6 +92,7 @@ impl fmt::Display for Class {
             Class::Protocol => f.write_str("class=protocol"),
             Class::Agent(kind) => write!(f, "class=agent kind={kind}"),
             Class::Keychain => f.write_str("class=keychain"),
+            Class::Palette(kind) => write!(f, "class=palette kind={kind}"),
             Class::Store(None) => f.write_str("class=store"),
             Class::Store(Some(code)) => write!(f, "class=store sqlite={code}"),
             Class::Other => f.write_str("class=other"),

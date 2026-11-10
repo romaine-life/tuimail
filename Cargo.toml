@@ -44,6 +44,7 @@ dotenvy = "0.15.7"
 futures = "0.3.34"
 html2text = "0.17"
 keyring-core = "1.0"
+libloading = "0.9"
 mail-builder = { version = "1.0", default-features = false }
 mail-parser = "0.11"
 open = { version = "5.4.4", features = ["shellexecute-on-windows"] }

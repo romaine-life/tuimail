@@ -36,6 +36,13 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
           targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,aarch64-pc-windows-msvc
+      # The palette's info panel: this commit, and when this build was made.
+      - name: Stamp the build
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "TM_COMMIT=$SOURCE_SHA" >> "$GITHUB_ENV"
+          echo "TM_BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - name: Install job-local cross-build tools
         shell: bash
         run: |
@@ -210,6 +217,11 @@ jobs:
         with:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
+      # The palette's info panel: this commit, and when this build was made.
+      - name: Stamp the build
+        run: |
+          "TM_COMMIT=$env:SOURCE_SHA" >> $env:GITHUB_ENV
+          "TM_BUILT=$([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))" >> $env:GITHUB_ENV
       - name: Format, lints and offline tests
         run: |
           $ErrorActionPreference = 'Stop'

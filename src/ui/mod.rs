@@ -4,6 +4,7 @@
 
 mod composer;
 mod list;
+mod palette;
 mod reader;
 mod setup;
 mod sidebar;
@@ -51,6 +52,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.help.is_some() {
         help(frame, app, area);
     }
+    let rows = palette::rows_area(area);
+    app.palette_area.set((rows.width, rows.height));
+    palette::draw(frame, app, area);
     if app.confirm.is_some() {
         confirm(frame, app, area);
     }
@@ -267,30 +271,31 @@ fn hints(app: &App) -> &'static str {
             PromptKind::Tag => "`Enter` tag · `Esc` cancel",
         };
     }
-    if app.picker.is_some() || app.help.is_some() || app.confirm.is_some() {
+    if app.picker.is_some() || app.help.is_some() || app.confirm.is_some() || app.palette.is_some()
+    {
         return "";
     }
     if app.setup.is_some() {
         return "`Tab` next · `Ctrl-s` check and save · `Esc` cancel";
     }
     if app.composer.is_some() {
-        return "`Tab` next field · `Ctrl-s` send · `Ctrl-d` save draft · `Ctrl-o` attach · `Ctrl-e` editor · `Esc` close";
+        return "`Ctrl-p` commands · `Tab` next field · `Ctrl-s` send · `Ctrl-d` save draft · `Ctrl-o` attach · `Ctrl-e` editor · `Esc` close";
     }
     match app.focus {
         Focus::Sidebar => {
-            "`Enter` open · `j k` move · `Tab` messages · `c` write · `+` add account · `?` help"
+            "`/` commands · `Enter` open · `j k` move · `Tab` messages · `c` write · `+` add account · `?` help"
         }
         Focus::List if !app.marked.is_empty() => {
-            "`Space` mark · `d` delete · `e` archive · `m` move · `t` tag · `u` read/unread · `s` star · `Esc` unmark"
+            "`/` commands · `Space` mark · `d` delete · `e` archive · `m` move · `t` tag · `u` read/unread · `s` star · `Esc` unmark"
         }
         Focus::List if app.search.is_some() => {
-            "`Enter` open · `Esc` end search · `/` search again · `r` reply · `d` delete · `?` help"
+            "`/` commands · `Enter` open · `Esc` end search · `r` reply · `d` delete · `?` help"
         }
         Focus::List => {
-            "`Enter` open · `c` write · `r` reply · `a` all · `f` forward · `d` delete · `e` archive · `s` star · `t` tag · `/` search · `?` help"
+            "`/` commands · `Enter` open · `c` write · `r` reply · `a` all · `f` forward · `d` delete · `e` archive · `s` star · `t` tag · `?` help"
         }
         Focus::Reader => {
-            "`j k` scroll · `J K` next/previous · `r` reply · `a` all · `f` forward · `o` links · `A` files · `H` html/text · `Esc` back"
+            "`/` commands · `j k` scroll · `J K` next/previous · `r` reply · `a` all · `f` forward · `o` links · `A` files · `H` html/text · `Esc` back"
         }
     }
 }
@@ -620,49 +625,6 @@ fn confirm(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-const HELP: [(&str, &str); 31] = [
-    ("←↓↑→  h j k l", "move; Enter or → opens"),
-    ("Tab", "folders → messages → message"),
-    ("gg  G  Ctrl-u Ctrl-d", "first, last, half a page"),
-    ("c", "write a message"),
-    ("r  /  a  /  f", "reply  /  reply to all  /  forward"),
-    ("d", "delete: to Trash; in Trash, for good"),
-    ("e  /  !", "archive  /  junk"),
-    ("m", "move to a folder"),
-    ("t", "tag: put a tag on or take it off; tag:work searches"),
-    (
-        "z  /  Z",
-        "undo the last change  /  the changes, to undo one",
-    ),
-    ("s  /  u", "star  /  read or unread"),
-    (
-        "Space  /  *",
-        "mark a message  /  all; actions take the marked",
-    ),
-    ("/", "search: here, and the server's folder"),
-    ("Esc", "end the search, unmark, back"),
-    ("J  K", "next, previous message (reading)"),
-    ("Space  b", "a page down, up (reading)"),
-    ("o", "the message's links: open, or y copy"),
-    ("A", "its attachments: open, or s save"),
-    ("H", "its HTML or plain text"),
-    ("U", "unsubscribe from a mailing list"),
-    ("R", "check for mail now"),
-    ("+  /  x  /  P", "add an account / remove it / its password"),
-    ("Ctrl-s", "send (writing)"),
-    ("Ctrl-d", "save in Drafts and close (writing)"),
-    ("Ctrl-o", "attach a file; or drop it on the window"),
-    ("Ctrl-e", "write the text in your editor"),
-    (
-        "Tab  ↑↓",
-        "the next field (writing); Tab takes a suggestion",
-    ),
-    ("←→ on From", "send from another account"),
-    ("x on Files", "take a file off"),
-    ("?  /  O", "these keys  /  settings and themes"),
-    ("q", "quit"),
-];
-
 /// The `?` popup, centered: a tab with every key, and one with the
 /// settings. Both are as big as the bigger one, so the tabs don't move.
 fn help(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -734,13 +696,26 @@ fn help(frame: &mut Frame, app: &mut App, area: Rect) {
     scrollbar(frame, popup, max, *scroll, &c);
 }
 
+/// Every command's keys, name (what the palette finds it by) and what it
+/// does, from the palette's list: one with no key of its own is `/`.
 fn key_lines(c: &Colors) -> Vec<Line<'static>> {
-    let key_width = HELP.iter().map(|(k, _)| cols(k)).max().unwrap_or(0);
-    HELP.iter()
-        .map(|(key, what)| {
+    let commands = crate::palette::COMMANDS;
+    let keys = |command: &crate::palette::Command| match command.keys {
+        "" => "/".to_string(),
+        keys => keys.to_string(),
+    };
+    let key_width = commands.iter().map(|k| cols(&keys(k))).max().unwrap_or(0);
+    let name_width = commands.iter().map(|k| cols(k.name)).max().unwrap_or(0);
+    commands
+        .iter()
+        .map(|command| {
             Line::from(vec![
-                Span::styled(format!(" {key:<key_width$}  "), Style::new().fg(c.accent)),
-                Span::styled(*what, Style::new().fg(c.text)),
+                Span::styled(
+                    format!(" {}  ", pad(&keys(command), key_width)),
+                    Style::new().fg(c.accent),
+                ),
+                Span::styled(pad(command.name, name_width), Style::new().fg(c.text)),
+                Span::styled(format!("  {}", command.what), Style::new().fg(c.dim)),
             ])
         })
         .collect()
@@ -943,6 +918,16 @@ pub mod tests {
         for width in [1, 30, 80, 200] {
             screen(&mut app, width, 20);
         }
+        app.help = None;
+        for palette in [
+            crate::palette::Palette::Failed("fzt isn't installed".into()),
+            crate::palette::Palette::Info(crate::info::lines()),
+        ] {
+            app.palette = Some(palette);
+            for (width, height) in [(1, 1), (10, 3), (50, 10), (200, 40)] {
+                screen(&mut app, width, height);
+            }
+        }
     }
 
     #[tokio::test]
@@ -951,6 +936,14 @@ pub mod tests {
         app.help = Some(HelpMenu::new(HelpTab::Keys));
         let shown = screen(&mut app, 120, 40);
         assert!(shown.contains("reply to all"), "{shown}");
+        let line = shown
+            .lines()
+            .find(|l| l.contains("check for mail"))
+            .unwrap();
+        assert!(line.contains(" R ") && line.contains("check every account now"));
+        let line = shown.lines().find(|l| l.contains("search here")).unwrap();
+        let words: Vec<_> = line.split_whitespace().collect();
+        assert!(words.windows(2).any(|w| w == ["/", "search"]), "{line}");
         assert!(!shown.contains("Before sending"));
         app.help = Some(HelpMenu::new(HelpTab::Settings));
         let shown = screen(&mut app, 120, 40);

@@ -5,8 +5,10 @@ mod compose;
 mod composer;
 mod config;
 mod demo;
+mod fzt;
 mod icons;
 mod imap;
+mod info;
 #[cfg(test)]
 mod live;
 mod logfile;
@@ -15,6 +17,7 @@ mod mcp;
 mod net;
 mod notify;
 mod oauth;
+mod palette;
 mod pop3;
 mod secrets;
 mod settings;
@@ -59,6 +62,7 @@ fn main() -> Result<()> {
 }
 
 async fn run() -> Result<()> {
+    info::read_installed_path();
     config::load_dotenv();
     let mut args = std::env::args().skip(1);
     let mut check = false;
