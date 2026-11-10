@@ -51,8 +51,8 @@ open = { version = "5.4.4", features = ["shellexecute-on-windows"] }
 ratatui = "0.30.2"
 ratatui-textarea = "0.9.3"
 ring = "0.17.14"
-rmcp = { version = "3.5.1", default-features = false, features = ["server", "macros", "transport-io"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rmcp = { version = "3.9.0", default-features = false, features = ["server", "macros", "transport-io"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-platform-verifier = "0.7.1"
 schemars = "1.2.3"
