@@ -18,10 +18,11 @@ jobs:
       RUSTUP_TOOLCHAIN: stable
       CARGO_BUILD_JOBS: "4"
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
+      - uses: romaine-life/pipeline-templates/actions/home-cache@main
       - name: Format and lints
         run: |
           $ErrorActionPreference = 'Stop'
@@ -31,3 +32,10 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo clippy --locked --all-targets -- -D warnings
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+  # The fetch check reads only the repo, and runs where Python is (FORGEJO-28).
+  fetches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: romaine-life/pipeline-templates/actions/check-fetches@main

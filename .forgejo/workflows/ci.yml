@@ -27,11 +27,12 @@ jobs:
     runs-on: [ubuntu-latest, upstairspc-linux]
     timeout-minutes: 90
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
-      - uses: https://github.com/dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: romaine-life/pipeline-templates/actions/home-cache@main
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: stable
           components: clippy, rustfmt
@@ -97,7 +98,7 @@ jobs:
           set -euo pipefail
           archive="$RUNNER_TEMP/cargo-audit-v0.22.2.tgz"
           curl --fail --silent --show-error --location --retry 3 \
-            https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz \
+            https://artifacts.home.romaine.life/general/github/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz \
             --output "$archive"
           printf '%s  %s\n' 7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428 "$archive" | sha256sum --check
           mkdir -p "$RUNNER_TEMP/cargo-audit"
@@ -124,12 +125,12 @@ jobs:
             cp "$bin" README.md LICENSE SECURITY.md "dist/$target/"
             tar czf "tuimail-$target.tar.gz" -C "dist/$target" tuimail README.md LICENSE SECURITY.md
           done
-      - uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+      - uses: forgejo/upload-artifact@v4
         with:
           name: tuimail-linux
           path: tuimail-*-unknown-linux-gnu.tar.gz
           if-no-files-found: error
-      - uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+      - uses: forgejo/upload-artifact@v4
         with:
           name: tuimail-windows-arm64
           path: target/aarch64-pc-windows-msvc/release/tuimail.exe
@@ -142,11 +143,12 @@ jobs:
     runs-on: [ubuntu-latest, upstairspc-linux]
     timeout-minutes: 20
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
-      - uses: https://github.com/dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: romaine-life/pipeline-templates/actions/home-cache@main
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: stable
       - name: Start GreenMail
@@ -213,10 +215,11 @@ jobs:
       RUSTUP_TOOLCHAIN: stable
       RUSTFLAGS: -C target-feature=+crt-static
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
+      - uses: romaine-life/pipeline-templates/actions/home-cache@main
       # The palette's info panel: this commit, and when this build was made.
       - name: Stamp the build
         run: |
@@ -243,7 +246,7 @@ jobs:
           $help = & target/x86_64-pc-windows-msvc/release/tuimail.exe --help
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           if (($help -join "`n") -notmatch 'IMAP and POP3') { throw 'Missing expected help text' }
-      - uses: https://data.forgejo.org/forgejo/download-artifact@v4
+      - uses: forgejo/download-artifact@v4
         with:
           name: tuimail-windows-arm64
           path: windows-arm64
@@ -278,7 +281,7 @@ jobs:
             $certificate.Dispose()
             [Array]::Clear($bytes, 0, $bytes.Length)
           }
-      - uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+      - uses: forgejo/upload-artifact@v4
         with:
           name: tuimail-windows
           path: tuimail-*-pc-windows-msvc.zip
@@ -303,7 +306,7 @@ jobs:
           if (-not $env:GH_MIRROR_TOKEN) { throw 'GH_MIRROR_TOKEN is not set' }
           if ($env:SOURCE_SHA -notmatch '^[0-9a-f]{40}$') { throw 'Invalid source SHA' }
           $repository = 'romaine-life/tuimail'
-          $api = "https://api.github.com/repos/$repository"
+          $api = "https://api.github.com/repos/$repository" # internet: GitHub-hosted Mac build artifacts
           $handler = [Net.Http.HttpClientHandler]::new()
           $handler.AllowAutoRedirect = $false
           $client = [Net.Http.HttpClient]::new($handler)
@@ -403,7 +406,7 @@ jobs:
             $client.Dispose()
             $downloadClient.Dispose()
           }
-      - uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+      - uses: forgejo/upload-artifact@v4
         with:
           name: tuimail-macos
           path: macos/*.tar.gz
@@ -418,19 +421,19 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
-      - uses: https://data.forgejo.org/forgejo/download-artifact@v4
+      - uses: forgejo/download-artifact@v4
         with:
           name: tuimail-linux
           path: release
-      - uses: https://data.forgejo.org/forgejo/download-artifact@v4
+      - uses: forgejo/download-artifact@v4
         with:
           name: tuimail-windows
           path: release
-      - uses: https://data.forgejo.org/forgejo/download-artifact@v4
+      - uses: forgejo/download-artifact@v4
         with:
           name: tuimail-macos
           path: release
