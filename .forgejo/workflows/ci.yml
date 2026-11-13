@@ -1,10 +1,10 @@
 name: CI
 
-# The full build. It runs only when Nelson says so, by pushing to `release`.
-# A dropped or failed run has no new commit to push: dispatch it on `release`.
+# The full build: every push to main builds, releases and installs it on the home PCs.
+# A dropped or failed run has no new commit to push: dispatch it on main.
 on:
   push:
-    branches: [release]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -417,6 +417,8 @@ jobs:
     needs: [linux, live, windows, macos]
     runs-on: windows-latest
     timeout-minutes: 10
+    outputs:
+      release-tag: ${{ steps.publish.outputs.release-tag }}
     defaults:
       run:
         shell: pwsh
@@ -425,6 +427,7 @@ jobs:
         with:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
+          fetch-depth: 0
       - uses: forgejo/download-artifact@v4
         with:
           name: tuimail-linux
@@ -437,7 +440,9 @@ jobs:
         with:
           name: tuimail-macos
           path: release
-      - name: Publish immutable Forgejo release
+      # Staged as a draft; the home-sync job publishes it just before it starts the PCs.
+      - name: Stage immutable Forgejo release
+        id: publish
         env:
           FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MACOS_RUN_URL: ${{ needs.macos.outputs.run-url }}
@@ -445,7 +450,15 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $version = [regex]::Match((Get-Content -Raw -LiteralPath Cargo.toml), '(?ms)^\[package\]\r?\n.*?^version = "([^"]+)"').Groups[1].Value
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid Cargo package version' }
+          # The first build of a Cargo version is vX.Y.Z; each later one is named from
+          # it, vX.Y.Z-<commits since>-g<commit>.
           $tag = "v$version"
+          git rev-parse --verify --quiet "refs/tags/$tag" | Out-Null
+          if (-not $LASTEXITCODE) {
+            $tag = git describe --tags --abbrev=7 --match $tag $env:SOURCE_SHA
+            if ($LASTEXITCODE -or -not $tag) { throw "git describe from v$version failed" }
+          }
+          $global:LASTEXITCODE = 0
           $expected = @(
             'tuimail-x86_64-unknown-linux-gnu.tar.gz',
             'tuimail-aarch64-unknown-linux-gnu.tar.gz',
@@ -466,12 +479,19 @@ jobs:
           $existing = Invoke-RestMethod "$api/releases/tags/$tag" -Headers $headers -SkipHttpErrorCheck -StatusCodeVariable releaseCode
           if ($releaseCode -eq 200) {
             $assetNames = @($existing.assets | ForEach-Object name)
-            if (-not $existing.draft -and -not (Compare-Object (($expected + 'SHA256SUMS') | Sort-Object) ($assetNames | Sort-Object)) -and
-                -not ($existing.assets | Where-Object { $_.size -le 0 })) {
-              Write-Host "$tag is already published; bump Cargo.toml and Cargo.lock to publish another version: $($existing.html_url)"
+            $complete = -not (Compare-Object (($expected + 'SHA256SUMS') | Sort-Object) ($assetNames | Sort-Object)) -and
+                -not ($existing.assets | Where-Object { $_.size -le 0 })
+            if ($complete -and -not $existing.draft) {
+              Write-Host "$tag is already published: $($existing.html_url)"
               exit 0
             }
-            throw "$tag already has an incomplete or draft release; refusing to overwrite it"
+            if ($complete) {
+              # A run whose home-sync job failed: hand the staged draft to it again.
+              Write-Host "$tag is staged as a draft: $($existing.html_url)"
+              "release-tag=$tag" | Add-Content $env:GITHUB_OUTPUT
+              exit 0
+            }
+            throw "$tag already has an incomplete release; refusing to overwrite it"
           } elseif ($releaseCode -ne 404) { throw "Release lookup returned HTTP $releaseCode" }
           $tagged = Invoke-RestMethod "$api/tags/$tag" -Headers $headers -SkipHttpErrorCheck -StatusCodeVariable tagCode
           if ($tagCode -eq 404) {
@@ -491,8 +511,6 @@ jobs:
                 attachment = Get-Item -LiteralPath "release/$name"
               } | Out-Null
             }
-            $published = Invoke-RestMethod -Method Patch "$api/releases/$($created.id)" -Headers $headers -ContentType 'application/json' -Body (@{ draft = $false } | ConvertTo-Json)
-            Write-Host "Published ${tag}: $($published.html_url)"
           } catch {
             # Only this run's still-draft release is removed. Its reserved tag
             # remains at this SHA for a retry; published versions stay immutable.
@@ -500,3 +518,13 @@ jobs:
             if ($current.draft) { Invoke-RestMethod -Method Delete "$api/releases/$($created.id)" -Headers $headers | Out-Null }
             throw
           }
+          Write-Host "Staged ${tag}: $($created.html_url)"
+          "release-tag=$tag" | Add-Content $env:GITHUB_OUTPUT
+
+  # Publishes the staged release and starts home-sync on every home PC, which installs it.
+  home-sync:
+    needs: release
+    uses: romaine-life/pipeline-templates/.forgejo/workflows/home-sync.yml@main
+    secrets: inherit
+    with:
+      release-tag: ${{ needs.release.outputs.release-tag }}
