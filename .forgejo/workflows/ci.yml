@@ -161,7 +161,7 @@ jobs:
           docker run -d --name "$greenmail" \
             -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=alice:secret@example.com,bob:secret@example.com -Dgreenmail.users.login=email' \
             -p 127.0.0.1::3465 -p 127.0.0.1::3993 -p 127.0.0.1::3995 \
-            greenmail/standalone:2.1.3@sha256:d6db42a4fc258fec0948b1ae7b579fd06947cc92087c162ec0597972a6c36850
+            artifacts.home.romaine.life/dockerhub/greenmail/standalone:2.1.3@sha256:d6db42a4fc258fec0948b1ae7b579fd06947cc92087c162ec0597972a6c36850
           published() { docker port "$greenmail" "$1/tcp" | head -1 | sed 's/.*://'; }
           imap=$(published 3993)
           pop3=$(published 3995)
