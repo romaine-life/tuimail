@@ -426,7 +426,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.SOURCE_SHA }}
-          persist-credentials: false
           fetch-depth: 0
       - uses: forgejo/download-artifact@v4
         with:
@@ -493,14 +492,17 @@ jobs:
             }
             throw "$tag already has an incomplete release; refusing to overwrite it"
           } elseif ($releaseCode -ne 404) { throw "Release lookup returned HTTP $releaseCode" }
-          $tagged = Invoke-RestMethod "$api/tags/$tag" -Headers $headers -SkipHttpErrorCheck -StatusCodeVariable tagCode
-          if ($tagCode -eq 404) {
-            Invoke-RestMethod -Method Post "$api/tags" -Headers $headers -ContentType 'application/json' -Body (@{
-              tag_name = $tag; target = $env:SOURCE_SHA
-            } | ConvertTo-Json) | Out-Null
-          } elseif ($tagCode -ne 200 -or $tagged.commit.sha -ne $env:SOURCE_SHA) {
-            throw "$tag is reserved for another commit or its lookup failed"
+          # Forgejo's tag API fails from a release job (run 41; spotify-player saw a 500),
+          # so the tag is pushed with git, through checkout's job credential.
+          $ref = git ls-remote origin "refs/tags/$tag"
+          if ($LASTEXITCODE) { throw "tag lookup for $tag failed" }
+          if (-not $ref) {
+            git push origin "$($env:SOURCE_SHA):refs/tags/$tag"
+            if ($LASTEXITCODE) { throw "creating tag $tag failed" }
+            $ref = git ls-remote origin "refs/tags/$tag"
+            if ($LASTEXITCODE) { throw "tag verification for $tag failed" }
           }
+          if (($ref -split '\s+')[0] -ne $env:SOURCE_SHA) { throw "$tag is reserved for another commit" }
           $notes = "Built from $env:SOURCE_SHA. Windows executables are signed with the at-terminal certificate. Mac checks and archives: $env:MACOS_RUN_URL"
           $created = Invoke-RestMethod -Method Post "$api/releases" -Headers $headers -ContentType 'application/json' -Body (@{
             tag_name = $tag; target_commitish = $env:SOURCE_SHA; name = $tag; body = $notes; draft = $true
