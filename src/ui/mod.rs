@@ -953,6 +953,8 @@ pub mod tests {
             .lines()
             .find(|l| l.contains("Catppuccin Mocha"))
             .unwrap();
+        assert!(!line.contains('●'), "{line}");
+        let line = shown.lines().find(|l| l.contains("Terminal")).unwrap();
         assert!(line.contains('●'), "the theme in use");
     }
 }
