@@ -317,7 +317,7 @@ confirm_agents = true    # ask before each change an agent makes
 
 To try it on made-up mail: run `tuimail --demo`, turn agents on there, and add `tuimail mcp --demo` to your agent instead.
 
-What an agent reads goes to its AI provider, as anything else you show it. AI agents reach tuimail on macOS and Linux; Windows isn't supported yet.
+What an agent reads goes to its AI provider, as anything else you show it. AI agents reach tuimail on macOS, Linux and Windows; there it's a named pipe only your own programs can open, and the path to give your agent is `C:\Program Files\at-home\tuimail\current\tuimail.exe` on a home PC, or wherever `tuimail.exe` is.
 
 ## Privacy and security
 

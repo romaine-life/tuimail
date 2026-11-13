@@ -7726,7 +7726,7 @@ pub mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn an_agent_reaches_tuimail_through_its_socket_while_the_setting_is_on() {
         let mut app = app();
@@ -7750,6 +7750,7 @@ pub mod tests {
         assert_eq!(accounts[0]["address"], app.accounts[0].id.as_str());
         app.settings.agents = false;
         app.listen_for_agents();
+        #[cfg(unix)]
         assert!(!socket.exists(), "the socket goes");
         assert_eq!(
             agent::ask(&socket, &request).await.unwrap_err().to_string(),
@@ -7758,7 +7759,7 @@ pub mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn agents_turned_off_elsewhere_are_off_here() {
         let mut app = app();
@@ -7797,6 +7798,7 @@ pub mod tests {
             app.agents.is_none() && !app.settings.agents,
             "and stops listening"
         );
+        #[cfg(unix)]
         assert!(!socket.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -10,7 +10,9 @@
 //! in the data folder (only the user's), is made only the user's, and a
 //! connection is answered only if it comes from a program of the same
 //! user. A request is one line of JSON, at most 64 KB, and so is its
-//! answer (at most 4 MB).
+//! answer (at most 4 MB). On Windows the socket is a named pipe of the
+//! same name, made this user's alone, and each side checks the process at
+//! the other end runs as this user (`windows`).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -263,20 +265,117 @@ pub fn hide_links(text: &str) -> String {
     out
 }
 
-/// Where the socket is.
+/// Where the socket is. On Windows the path names the pipe (`windows::pipe_name`).
 pub fn socket(data_dir: &Path, demo: bool) -> PathBuf {
     data_dir.join(if demo { DEMO_SOCKET } else { SOCKET })
 }
 
-#[cfg(not(unix))]
+/// The longest request read, and answer.
+pub const MAX_REQUEST: usize = 64 << 10;
+pub const MAX_ANSWER: usize = 4 << 20;
+/// How long `tuimail mcp` waits for an answer: a little longer than a
+/// change waits for the user.
+const ANSWER_WITHIN: Duration = Duration::from_secs(5 * 60 + 30);
+
+/// Why `tuimail mcp` gets no answer.
+pub const NOT_LISTENING: &str = "tuimail isn't open, or its AI agents setting is off. \
+    Ask the user to open tuimail and turn on AI agents in its settings (O).";
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum Wire {
+    Ok(serde_json::Value),
+    Error(String),
+}
+
+/// Answers one request on a connection already checked to be this user's.
+async fn serve<S>(
+    stream: S,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::app::AppEvent>,
+) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    let (read, mut write) = tokio::io::split(stream);
+    let mut line = Vec::new();
+    let mut reader = BufReader::new(read.take(MAX_REQUEST as u64));
+    tokio::time::timeout(Duration::from_secs(10), reader.read_until(b'\n', &mut line)).await??;
+    let answer = match serde_json::from_slice::<Request>(&line) {
+        Ok(request) => {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            tx.send(crate::app::AppEvent::Agent { request, reply })?;
+            let waited = tokio::time::timeout(ASK_FOR + Duration::from_secs(15), answer);
+            // An agent that leaves stops waiting: dropping the answer
+            // takes its question off the screen, so a `y` can't make
+            // a change nobody waits for.
+            let mut byte = [0u8; 1];
+            tokio::select! {
+                answer = waited => match answer {
+                    Ok(Ok(answer)) => answer,
+                    _ => Err("tuimail didn't answer in time".into()),
+                },
+                _ = reader.read(&mut byte) => return Ok(()),
+            }
+        }
+        Err(_) => Err("that isn't a request tuimail understands".into()),
+    };
+    let wire = match answer {
+        Ok(value) => Wire::Ok(value),
+        Err(error) => Wire::Error(error),
+    };
+    let mut out = serde_json::to_vec(&wire)?;
+    out.truncate(MAX_ANSWER);
+    out.push(b'\n');
+    // One that never reads doesn't hold its slot for good.
+    tokio::time::timeout(Duration::from_secs(30), write.write_all(&out)).await??;
+    Ok(())
+}
+
+/// Sends one request down a connection already checked to be a tuimail of
+/// this user's, and reads its answer. An error is why tuimail gave no
+/// answer: its text is the agent's, and its class the log's.
+async fn exchange<S>(mut stream: S, request: &Request) -> anyhow::Result<Answer>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use crate::logfile::Class;
+    use anyhow::Context;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    let mut out = serde_json::to_vec(request)?;
+    if out.len() >= MAX_REQUEST {
+        return Err(Class::Agent("too-long")
+            .with("the request is too long")
+            .into());
+    }
+    out.push(b'\n');
+    stream.write_all(&out).await.context(NOT_LISTENING)?;
+    let mut line = Vec::new();
+    let mut reader = BufReader::new(stream.take(MAX_ANSWER as u64 + 2));
+    tokio::time::timeout(ANSWER_WITHIN, reader.read_until(b'\n', &mut line))
+        .await
+        .context("tuimail didn't answer in time")??;
+    // Taken and closed without a word: a tuimail that stopped listening
+    // as the agent arrived (agents turned off, or quitting).
+    if line.is_empty() {
+        return Err(Class::Agent("not-listening").with(NOT_LISTENING).into());
+    }
+    match serde_json::from_slice::<Wire>(&line) {
+        Ok(Wire::Ok(value)) => Ok(Ok(value)),
+        Ok(Wire::Error(error)) => Ok(Err(error)),
+        Err(_) => Err(Class::Protocol.with("tuimail's answer didn't read").into()),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 pub use other::{Listener, ask, listen};
-#[cfg(all(unix, test))]
-pub use unix::NOT_LISTENING;
 #[cfg(unix)]
 pub use unix::{Listener, ask, listen};
+#[cfg(windows)]
+pub use windows::{Listener, ask, listen};
 
-/// Windows: not yet (a named pipe, made the user's alone, would do).
-#[cfg(not(unix))]
+/// Neither a Unix socket nor a named pipe: not yet.
+#[cfg(not(any(unix, windows)))]
 mod other {
     use std::path::Path;
 
@@ -290,12 +389,12 @@ mod other {
     pub struct Listener;
 
     pub fn listen(_: &Path, _: UnboundedSender<AppEvent>) -> Result<Listener> {
-        bail!("AI agents can't reach tuimail on Windows yet")
+        bail!("AI agents can't reach tuimail on this system yet")
     }
 
     pub async fn ask(_: &Path, _: &Request) -> Result<Answer> {
         Err(Class::Agent("not-listening")
-            .with("tuimail mcp isn't available on Windows yet")
+            .with("tuimail mcp isn't available on this system yet")
             .into())
     }
 }
@@ -306,32 +405,13 @@ mod unix {
     use std::sync::Arc;
 
     use anyhow::{Context, Result, bail};
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::{UnixListener, UnixStream};
-    use tokio::sync::{Semaphore, mpsc::UnboundedSender, oneshot};
+    use tokio::sync::{Semaphore, mpsc::UnboundedSender};
     use tokio::task::JoinHandle;
 
     use super::*;
     use crate::app::AppEvent;
     use crate::logfile::Class;
-
-    /// The longest request read, and answer.
-    pub const MAX_REQUEST: usize = 64 << 10;
-    pub const MAX_ANSWER: usize = 4 << 20;
-    /// How long `tuimail mcp` waits for an answer: a little longer than a
-    /// change waits for the user.
-    const ANSWER_WITHIN: std::time::Duration = std::time::Duration::from_secs(5 * 60 + 30);
-
-    /// Why `tuimail mcp` gets no answer.
-    pub const NOT_LISTENING: &str = "tuimail isn't open, or its AI agents setting is off. \
-        Ask the user to open tuimail and turn on AI agents in its settings (O).";
-
-    #[derive(Serialize, Deserialize)]
-    #[serde(rename_all = "snake_case", deny_unknown_fields)]
-    enum Wire {
-        Ok(serde_json::Value),
-        Error(String),
-    }
 
     /// tuimail listening for agents; dropping it stops, ends every
     /// connection open, and removes the socket (if it's still this one).
@@ -436,58 +516,15 @@ mod unix {
         })
     }
 
-    /// Answers one request.
-    async fn serve(stream: UnixStream, tx: UnboundedSender<AppEvent>) -> Result<()> {
-        let (read, mut write) = stream.into_split();
-        let mut line = Vec::new();
-        let mut reader = BufReader::new(read.take(MAX_REQUEST as u64));
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            reader.read_until(b'\n', &mut line),
-        )
-        .await??;
-        let answer = match serde_json::from_slice::<Request>(&line) {
-            Ok(request) => {
-                let (reply, answer) = oneshot::channel();
-                tx.send(AppEvent::Agent { request, reply })?;
-                let waited =
-                    tokio::time::timeout(ASK_FOR + std::time::Duration::from_secs(15), answer);
-                // An agent that leaves stops waiting: dropping the answer
-                // takes its question off the screen, so a `y` can't make
-                // a change nobody waits for.
-                let mut byte = [0u8; 1];
-                tokio::select! {
-                    answer = waited => match answer {
-                        Ok(Ok(answer)) => answer,
-                        _ => Err("tuimail didn't answer in time".into()),
-                    },
-                    _ = reader.read(&mut byte) => return Ok(()),
-                }
-            }
-            Err(_) => Err("that isn't a request tuimail understands".into()),
-        };
-        let wire = match answer {
-            Ok(value) => Wire::Ok(value),
-            Err(error) => Wire::Error(error),
-        };
-        let mut out = serde_json::to_vec(&wire)?;
-        out.truncate(MAX_ANSWER);
-        out.push(b'\n');
-        // One that never reads doesn't hold its slot for good.
-        tokio::time::timeout(std::time::Duration::from_secs(30), write.write_all(&out)).await??;
-        Ok(())
-    }
-
     /// Asks the tuimail listening at `path` (`tuimail mcp`'s side): only a
     /// socket of this user's, not through a link, and only a listener of
     /// this user's, since what it answers goes to the agent as the user's
-    /// mail. An error is why tuimail gave no answer: its text is the
-    /// agent's, and its class the log's.
+    /// mail.
     pub async fn ask(path: &Path, request: &Request) -> Result<Answer> {
         if identity(path).is_none() {
             return Err(Class::Agent("not-listening").with(NOT_LISTENING).into());
         }
-        let mut stream = UnixStream::connect(path).await.context(NOT_LISTENING)?;
+        let stream = UnixStream::connect(path).await.context(NOT_LISTENING)?;
         // SAFETY: geteuid has no preconditions.
         let me = unsafe { libc::geteuid() };
         if !stream.peer_cred().is_ok_and(|c| c.uid() == me) {
@@ -495,23 +532,354 @@ mod unix {
                 .with("what answers at tuimail's socket isn't yours: not asked")
                 .into());
         }
-        let mut out = serde_json::to_vec(request)?;
-        if out.len() >= MAX_REQUEST {
-            return Err(Class::Agent("too-long")
-                .with("the request is too long")
+        exchange(stream, request).await
+    }
+}
+
+/// Windows: a named pipe in place of the socket. Its name is the socket's
+/// path, so each data folder (and the demo) has its own; it's made with an
+/// access list naming this user alone, and each side checks the process at
+/// the other end runs as this user before a word is exchanged, as the Unix
+/// side checks the peer's uid.
+#[cfg(windows)]
+mod windows {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use anyhow::{Context, Result, bail};
+    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
+    use tokio::sync::{Semaphore, mpsc::UnboundedSender};
+    use tokio::task::JoinHandle;
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, HANDLE, LocalFree,
+    };
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        GetLengthSid, GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+        TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::System::Pipes::{
+        GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    use super::*;
+    use crate::app::AppEvent;
+    use crate::logfile::Class;
+
+    /// The longest pipe name Windows takes is 256 characters.
+    const MAX_NAME: usize = 250;
+
+    /// The pipe named by the socket's path: the path's bytes in hex after a
+    /// fixed prefix, so no two data folders share one and no character of
+    /// the path can shape the name.
+    pub fn pipe_name(path: &Path) -> Result<String> {
+        let mut name = String::from(r"\\.\pipe\tuimail-");
+        for byte in path.as_os_str().as_encoded_bytes() {
+            name.push_str(&format!("{byte:02x}"));
+        }
+        if name.len() > MAX_NAME {
+            bail!("the data folder's path is too long for agents to reach tuimail through it");
+        }
+        Ok(name)
+    }
+
+    /// A handle closed when dropped.
+    struct Handle(HANDLE);
+
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            // SAFETY: a handle this opened, closed once.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    /// The SID of the user a process runs as, as bytes; `None` for a
+    /// process that can't be read (another user's, or gone).
+    fn user_of(process: HANDLE) -> Option<Vec<u8>> {
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: a valid process handle; the token is closed below.
+        if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
+            return None;
+        }
+        let token = Handle(token);
+        let mut needed = 0u32;
+        // SAFETY: asking the size; a failure is expected here.
+        unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut needed) };
+        if needed == 0 {
+            return None;
+        }
+        let mut buffer = vec![0u8; needed as usize];
+        // SAFETY: the buffer is as large as asked.
+        if unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenUser,
+                buffer.as_mut_ptr() as *mut c_void,
+                needed,
+                &mut needed,
+            )
+        } == 0
+        {
+            return None;
+        }
+        // SAFETY: a TOKEN_USER was written at the start of the buffer, and
+        // its SID points into the same buffer.
+        let sid = unsafe { (*(buffer.as_ptr() as *const TOKEN_USER)).User.Sid };
+        if sid.is_null() {
+            return None;
+        }
+        // SAFETY: a SID the system wrote.
+        let length = unsafe { GetLengthSid(sid) } as usize;
+        // SAFETY: `length` bytes of SID at `sid`, inside the buffer.
+        Some(unsafe { std::slice::from_raw_parts(sid as *const u8, length) }.to_vec())
+    }
+
+    /// This process's user.
+    fn me() -> Result<Vec<u8>> {
+        // SAFETY: the current process's pseudo-handle needs no closing.
+        user_of(unsafe { GetCurrentProcess() }).context("cannot read who you are")
+    }
+
+    /// Whether the process `pid` runs as this user: the other end of a
+    /// pipe, checked before anything is read or answered.
+    fn same_user(pid: u32, me: &[u8]) -> bool {
+        if pid == 0 {
+            return false;
+        }
+        // SAFETY: a limited query handle, closed by `Handle`.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return false;
+        }
+        user_of(Handle(process).0).is_some_and(|user| user == me)
+    }
+
+    /// A security descriptor naming one user, freed when dropped.
+    struct Descriptor(PSECURITY_DESCRIPTOR);
+
+    // SAFETY: the descriptor is a block this process allocated, read by
+    // the system only while an instance is made, and freed once.
+    unsafe impl Send for Descriptor {}
+
+    impl Drop for Descriptor {
+        fn drop(&mut self) {
+            // SAFETY: memory LocalAlloc'd by the conversion, freed once.
+            unsafe { LocalFree(self.0) };
+        }
+    }
+
+    /// Access for this user alone (`D:P(A;;GA;;;<sid>)`: a protected list
+    /// with one entry, generic all for the user, inheriting nothing).
+    fn only_me(me: &[u8]) -> Result<Descriptor> {
+        let mut text: *mut u16 = std::ptr::null_mut();
+        // SAFETY: a SID of this process's user, as bytes it wrote.
+        if unsafe { ConvertSidToStringSidW(me.as_ptr() as *mut c_void, &mut text) } == 0 {
+            bail!("cannot name who you are");
+        }
+        // SAFETY: a NUL-ended UTF-16 string the system allocated.
+        let sid = unsafe {
+            let mut length = 0;
+            while *text.add(length) != 0 {
+                length += 1;
+            }
+            String::from_utf16_lossy(std::slice::from_raw_parts(text, length))
+        };
+        // SAFETY: allocated by the conversion above.
+        unsafe { LocalFree(text as *mut c_void) };
+        let sddl: Vec<u16> = format!("D:P(A;;GA;;;{sid})")
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: a NUL-ended string; the descriptor is freed by `Descriptor`.
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            bail!("cannot make the agents' pipe yours alone");
+        }
+        Ok(Descriptor(descriptor))
+    }
+
+    /// One more instance of the pipe, for the next agent to connect to.
+    fn instance(
+        name: &str,
+        descriptor: &Descriptor,
+        first: bool,
+    ) -> std::io::Result<NamedPipeServer> {
+        let mut attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: 0,
+        };
+        // SAFETY: a valid SECURITY_ATTRIBUTES for the call's duration.
+        unsafe {
+            ServerOptions::new()
+                .first_pipe_instance(first)
+                .reject_remote_clients(true)
+                .create_with_security_attributes_raw(
+                    name,
+                    &mut attributes as *mut SECURITY_ATTRIBUTES as *mut c_void,
+                )
+        }
+    }
+
+    /// tuimail listening for agents; dropping it stops, ends every
+    /// connection open, and closes the pipe.
+    pub struct Listener {
+        task: JoinHandle<()>,
+    }
+
+    impl Drop for Listener {
+        fn drop(&mut self) {
+            // The pipe's instances and connections are the task's: they
+            // close with it.
+            self.task.abort();
+        }
+    }
+
+    /// Listens at the pipe named by `path`; each request reaches the app
+    /// as [`AppEvent::Agent`].
+    pub fn listen(path: &Path, tx: UnboundedSender<AppEvent>) -> Result<Listener> {
+        let name = pipe_name(path)?;
+        let me = me()?;
+        let descriptor = only_me(&me)?;
+        // The first instance: a name already held, by another tuimail or
+        // anything else, is never taken.
+        let first = match instance(&name, &descriptor, true) {
+            Ok(server) => server,
+            Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                bail!("another tuimail is answering agents")
+            }
+            Err(e) => return Err(e).context("cannot listen for agents"),
+        };
+        // A few at a time: one agent's calls come one by one.
+        let slots = Arc::new(Semaphore::new(8));
+        let task = tokio::spawn(async move {
+            // Owned here, so stopping the listener stops them too.
+            let mut connections = tokio::task::JoinSet::new();
+            let mut server = first;
+            loop {
+                while connections.try_join_next().is_some() {}
+                if server.connect().await.is_err() {
+                    // Out of handles, say: not again at once.
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+                let connected = server;
+                server = loop {
+                    match instance(&name, &descriptor, false) {
+                        Ok(next) => break next,
+                        Err(_) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    }
+                };
+                let mut pid = 0u32;
+                // SAFETY: a connected pipe handle this task owns.
+                unsafe {
+                    GetNamedPipeClientProcessId(connected.as_raw_handle() as HANDLE, &mut pid)
+                };
+                if !same_user(pid, &me) {
+                    continue;
+                }
+                let Ok(slot) = slots.clone().try_acquire_owned() else {
+                    continue;
+                };
+                let tx = tx.clone();
+                connections.spawn(async move {
+                    let _ = serve(connected, tx).await;
+                    drop(slot);
+                });
+            }
+        });
+        Ok(Listener { task })
+    }
+
+    /// Asks the tuimail listening at the pipe named by `path` (`tuimail
+    /// mcp`'s side): only one answered by a process of this user's, since
+    /// what it answers goes to the agent as the user's mail. The client
+    /// handle identifies this process to the server, and no more (tokio's
+    /// default), so a pipe that isn't tuimail's can't act as the user.
+    pub async fn ask(path: &Path, request: &Request) -> Result<Answer> {
+        let name = pipe_name(path)?;
+        let me = me()?;
+        let mut tries = 0;
+        let client = loop {
+            match ClientOptions::new().open(&name) {
+                Ok(client) => break client,
+                // Every instance is taken for the moment: a few more tries.
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) && tries < 20 => {
+                    tries += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
+                    return Err(Class::Agent("not-listening").with(NOT_LISTENING).into());
+                }
+                Err(e) => return Err(e).context(NOT_LISTENING),
+            }
+        };
+        let mut pid = 0u32;
+        // SAFETY: a connected pipe handle this function owns.
+        unsafe { GetNamedPipeServerProcessId(client.as_raw_handle() as HANDLE, &mut pid) };
+        if !same_user(pid, &me) {
+            return Err(Class::Agent("not-yours")
+                .with("what answers at tuimail's pipe isn't yours: not asked")
                 .into());
         }
-        out.push(b'\n');
-        stream.write_all(&out).await.context(NOT_LISTENING)?;
-        let mut line = Vec::new();
-        let mut reader = BufReader::new(stream.take(MAX_ANSWER as u64 + 2));
-        tokio::time::timeout(ANSWER_WITHIN, reader.read_until(b'\n', &mut line))
-            .await
-            .context("tuimail didn't answer in time")??;
-        match serde_json::from_slice::<Wire>(&line) {
-            Ok(Wire::Ok(value)) => Ok(Ok(value)),
-            Ok(Wire::Error(error)) => Ok(Err(error)),
-            Err(_) => Err(Class::Protocol.with("tuimail's answer didn't read").into()),
+        exchange(client, request).await
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_pipe_is_named_by_the_path_and_a_long_one_is_refused() {
+            let name = pipe_name(Path::new(r"C:\x\agent.sock")).unwrap();
+            assert!(name.starts_with(r"\\.\pipe\tuimail-"));
+            assert_eq!(
+                &name[r"\\.\pipe\tuimail-".len()..],
+                "433a5c785c6167656e742e736f636b"
+            );
+            assert_ne!(name, pipe_name(Path::new(r"C:\x\demo-agent.sock")).unwrap());
+            let long = format!(r"C:\{}\agent.sock", "a".repeat(200));
+            assert!(pipe_name(Path::new(&long)).is_err());
+        }
+
+        #[test]
+        fn this_process_is_this_user_and_no_process_is_nobody() {
+            let me = me().unwrap();
+            assert!(same_user(std::process::id(), &me));
+            assert!(!same_user(0, &me));
+        }
+
+        #[tokio::test]
+        async fn asking_where_nothing_listens_says_so() {
+            let dir = crate::tools::private_temp_dir().unwrap();
+            let socket = super::super::socket(&dir, false);
+            let request = Request {
+                client: "test".into(),
+                call: Call::ListAccounts(NoArgs {}),
+            };
+            assert_eq!(
+                ask(&socket, &request).await.unwrap_err().to_string(),
+                NOT_LISTENING
+            );
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }
