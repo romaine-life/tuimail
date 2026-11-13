@@ -9,7 +9,7 @@ use ratatui::style::Color;
 use serde::Deserialize;
 
 /// The theme used when the settings name none, or one that isn't built in.
-pub const DEFAULT: &str = "mocha";
+pub const DEFAULT: &str = "terminal";
 
 /// The built-in themes by name, lightest Catppuccin flavor first; last,
 /// the one in the terminal's own colors.
