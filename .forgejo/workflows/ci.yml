@@ -1,8 +1,10 @@
 name: CI
 
-# The full build: every push to main builds, releases and installs it on the home PCs.
-# A dropped or failed run has no new commit to push: dispatch it on main.
+# A pull request runs only Lint. Every push to main builds, tests, releases and
+# installs it on the home PCs. A dropped or failed run has no new commit to push:
+# dispatch it on main.
 on:
+  pull_request:
   push:
     branches: [main]
   workflow_dispatch:
@@ -10,6 +12,7 @@ on:
 permissions:
   contents: write
 
+# Never cancelled: Live starts a GreenMail container, and a cancelled job skips its removal.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: false
@@ -20,8 +23,68 @@ env:
   CARGO_BUILD_JOBS: "4"
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: romaine-life/pipeline-templates/actions/check-fetches@main
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo code=true >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only "$BASE...HEAD")
+          if grep -qvE '\.md$|^docs/|^LICENSE$' <<< "$files"; then
+            echo code=true >> "$GITHUB_OUTPUT"
+          fi
+
+  # Pull requests only: Linux and Windows run the same fmt and clippy on a push, and a
+  # second Windows job there would queue behind the build on the shared runner.
+  lint:
+    name: Lint
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RUSTUP_TOOLCHAIN: stable
+      # Cargo's default, which the workflow turns off for the builds: the kept target
+      # folder then rechecks only what changed.
+      CARGO_INCREMENTAL: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: romaine-life/pipeline-templates/actions/home-cache@main
+      - name: Format and lints
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Kept on the runner: a new folder compiles every dependency again.
+          $env:CARGO_TARGET_DIR = "$env:USERPROFILE\.forgejo-runner\tuimail-lint"
+          cargo fmt --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+  # The full build never runs on a pull request: a PR's wait is Lint's seconds (TUI-5).
+  # Windows and home-sync are skipped with the jobs they need.
   linux:
     name: Linux
+    if: github.event_name != 'pull_request'
     # These are existing labels on the i9's container runner. Keep the three
     # cross-builds together instead of queuing them on the small NAS runner.
     runs-on: [ubuntu-latest, upstairspc-linux]
@@ -138,6 +201,7 @@ jobs:
 
   live:
     name: Live
+    if: github.event_name != 'pull_request'
     # Jobs here share the network of the runner's own Docker, so a port published
     # on 127.0.0.1 is reachable. Random ports keep two PRs' runs apart.
     runs-on: [ubuntu-latest, upstairspc-linux]
@@ -289,6 +353,7 @@ jobs:
 
   macos:
     name: macOS
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     timeout-minutes: 70
     outputs:
@@ -415,6 +480,7 @@ jobs:
   release:
     name: Release
     needs: [linux, live, windows, macos]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: windows-latest
     timeout-minutes: 10
     outputs:

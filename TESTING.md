@@ -16,7 +16,7 @@ cargo test --locked -j 4
 ```
 
 Keep local builds to four jobs (nelsonpc is a gaming PC), and never install a local
-build: releases come from CI. A PR runs only `lint.yml` (fmt and clippy); the full
+build: releases come from CI. A PR runs only CI's Lint job (fmt and clippy); the full
 build, the tests against GreenMail and the release run on the push to main. UI
 behavior is tested by rendering into ratatui's `TestBackend` (`ui/` tests,
 `app::tests::app()`); add a focused test there when what the screen shows changes.
