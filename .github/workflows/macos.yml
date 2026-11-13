@@ -1,10 +1,10 @@
 name: macOS
 
-# GitHub is the Mac builder for Forgejo's full build, which only a push to
-# `release` starts.
+# GitHub is the Mac builder for Forgejo's full build, which every push to main
+# starts.
 on:
   push:
-    branches: [release]
+    branches: [main]
 
 permissions:
   contents: read
