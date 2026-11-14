@@ -46,8 +46,8 @@ jobs:
             echo code=true >> "$GITHUB_OUTPUT"
           fi
 
-  # Pull requests only: Linux and Windows run the same fmt and clippy on a push, and a
-  # second Windows job there would queue behind the build on the shared runner.
+  # Pull requests only: Linux and Windows run the same fmt and clippy on a push, so a
+  # second Windows job there would only repeat them.
   lint:
     name: Lint
     needs: changes
