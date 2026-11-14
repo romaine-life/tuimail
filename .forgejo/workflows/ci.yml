@@ -95,9 +95,8 @@ jobs:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
       - uses: romaine-life/pipeline-templates/actions/home-cache@main
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: romaine-life/pipeline-templates/actions/rust-toolchain@main
         with:
-          toolchain: stable
           components: clippy, rustfmt
           targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,aarch64-pc-windows-msvc
       # The palette's info panel: this commit, and when this build was made.
@@ -212,9 +211,7 @@ jobs:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
       - uses: romaine-life/pipeline-templates/actions/home-cache@main
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          toolchain: stable
+      - uses: romaine-life/pipeline-templates/actions/rust-toolchain@main
       - name: Start GreenMail
         shell: bash
         run: |
