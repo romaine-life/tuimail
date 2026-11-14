@@ -84,7 +84,7 @@ async fn run() -> Result<()> {
         }
         Some("-h" | "--help") => return print(&help()?),
         Some("-V" | "--version") => {
-            return print(&format!("tuimail {}\n", env!("CARGO_PKG_VERSION")));
+            return print(&format!("tuimail {}\n", info::VERSION));
         }
         Some(other) => bail!(
             "unknown argument {:?}; see tuimail --help",
@@ -194,7 +194,7 @@ fn print_check(
 ) -> Result<()> {
     let mut out = format!(
         "tuimail {}\ndata folder  {}\nlog          {}\nkeychain     {}\n",
-        env!("CARGO_PKG_VERSION"),
+        info::VERSION,
         config::shown(&config.data_dir),
         config::shown(&config.data_dir.join(logfile::FILE)),
         if keychain {
@@ -298,7 +298,7 @@ Environment:
   TM_ICONS      which icons: auto, nerd (Nerd Font) or plain
                 (also `icons` in settings.toml)
 ",
-        version = env!("CARGO_PKG_VERSION"),
+        version = info::VERSION,
         data = config::shown(&config::data_dir()?),
     ))
 }

@@ -284,10 +284,7 @@ fn write(text: &str) {
 /// written, which the app says on the screen.
 pub fn open(data_dir: &Path, accounts: usize) -> std::io::Result<()> {
     let path = data_dir.join(FILE);
-    let start = format!(
-        "start version={} accounts={accounts}",
-        env!("CARGO_PKG_VERSION")
-    );
+    let start = format!("start version={} accounts={accounts}", crate::info::VERSION);
     append(&path, &start)?;
     let _ = LOG.set(path);
     Ok(())

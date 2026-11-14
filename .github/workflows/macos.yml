@@ -1,10 +1,11 @@
 name: macOS
 
-# GitHub is the Mac builder for Forgejo's full build, which every push to main
-# starts.
+# GitHub is the Mac builder for Forgejo's full build. The build's Linux job reserves
+# the release's tag (v0.2.5.N, release-version) on the commit and the push mirror
+# carries it here, which starts this run, named by that tag.
 on:
   push:
-    branches: [main]
+    tags: ['v*.*.*.*']
 
 permissions:
   contents: read
@@ -29,11 +30,13 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-      # The palette's info panel: this commit, and when this build was made.
+      # The palette's info panel and --version: this version, its commit, and when this
+      # build was made.
       - name: Stamp the build
         shell: bash
         run: |
           set -euo pipefail
+          echo "TM_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
           echo "TM_COMMIT=$GITHUB_SHA" >> "$GITHUB_ENV"
           echo "TM_BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - run: cargo fmt --check

@@ -301,7 +301,7 @@ impl Mail {
 impl ServerHandler for Mail {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("tuimail", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new("tuimail", crate::info::VERSION))
             .with_instructions(INSTRUCTIONS)
     }
 }

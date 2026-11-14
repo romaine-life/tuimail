@@ -1,6 +1,6 @@
-//! What the palette's "info" panel says: this build's repo and version
-//! (from Cargo.toml), its commit and when it was built (stamped by the full
-//! build's CI: `TM_COMMIT`, `TM_BUILT`), and where it runs on this PC.
+//! What the palette's "info" panel says: this build's repo (from Cargo.toml),
+//! its version, commit and when it was built (stamped by the full build's CI:
+//! `TM_VERSION`, `TM_COMMIT`, `TM_BUILT`), and where it runs on this PC.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -9,6 +9,13 @@ use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, TimeDelta, Utc, Weekday
 
 const NOT_FROM_CI: &str = "a development build, not from CI";
 const NO_CHECKOUT: &str = "no checkout on this PC";
+
+/// This build's version, wherever tuimail says it: the release CI numbered it
+/// as (v0.2.5.4), or Cargo.toml's with `-dev` for a build not from CI.
+pub const VERSION: &str = match option_env!("TM_VERSION") {
+    Some(version) if !version.is_empty() => version,
+    _ => concat!(env!("CARGO_PKG_VERSION"), "-dev"),
+};
 
 #[derive(Clone, Copy)]
 struct Stamps {
@@ -20,7 +27,7 @@ struct Stamps {
 
 const STAMPS: Stamps = Stamps {
     repo: env!("CARGO_PKG_REPOSITORY"),
-    version: env!("CARGO_PKG_VERSION"),
+    version: VERSION,
     commit: option_env!("TM_COMMIT"),
     built: option_env!("TM_BUILT"),
 };
@@ -47,11 +54,8 @@ fn lines_from(
     exists: &dyn Fn(&Path) -> std::io::Result<bool>,
 ) -> Vec<(&'static str, String)> {
     let stamp = |s: Option<&'static str>| s.filter(|s| !s.is_empty());
-    let commit = stamp(stamps.commit).map(|c| c.chars().take(12).collect::<String>());
-    let version = match &commit {
-        Some(commit) => format!("{} ({commit})", stamps.version),
-        None => format!("{} ({NOT_FROM_CI})", stamps.version),
-    };
+    let commit = stamp(stamps.commit)
+        .map_or_else(|| NOT_FROM_CI.to_string(), |c| c.chars().take(12).collect());
     // `https://host/owner/name`: the repo is what follows the host.
     let link = stamps.repo.trim_end_matches('/');
     let repo = link.splitn(4, '/').nth(3).unwrap_or(link);
@@ -59,7 +63,8 @@ fn lines_from(
     vec![
         ("Repo", repo.to_string()),
         ("Link", link.to_string()),
-        ("Version", version),
+        ("Version", stamps.version.to_string()),
+        ("Commit", commit),
         (
             "Built",
             stamp(stamps.built).map_or_else(|| NOT_FROM_CI.to_string(), |b| built_line(b, now)),
@@ -155,11 +160,12 @@ mod tests {
 
     const STAMPED: Stamps = Stamps {
         repo: "https://forgejo.romaine.life/romaine-life/tuimail",
-        version: "0.2.6",
+        version: "v0.2.6.3",
         commit: Some("0123456789abcdef0123"),
         built: Some("2026-11-02T23:14:00Z"),
     };
     const UNSTAMPED: Stamps = Stamps {
+        version: "0.2.6-dev",
         commit: None,
         built: Some(""),
         ..STAMPED
@@ -176,7 +182,7 @@ mod tests {
     fn lines_of(stamps: Stamps, checkout: bool) -> Vec<(&'static str, String)> {
         lines_from(
             stamps,
-            r"C:\Program Files\at-home\tuimail\v0.2.6\tuimail.exe",
+            r"C:\Program Files\at-home\tuimail\v0.2.6.3\tuimail.exe",
             at("2026-11-04T23:14:00Z"),
             &|_| Ok(checkout),
         )
@@ -188,21 +194,30 @@ mod tests {
         let labels: Vec<_> = lines.iter().map(|(label, _)| *label).collect();
         assert_eq!(
             labels,
-            ["Repo", "Link", "Version", "Built", "Installed", "Checkout"]
+            [
+                "Repo",
+                "Link",
+                "Version",
+                "Commit",
+                "Built",
+                "Installed",
+                "Checkout"
+            ]
         );
         assert_eq!(value(&lines, "Repo"), "romaine-life/tuimail");
         assert_eq!(
             value(&lines, "Link"),
             "https://forgejo.romaine.life/romaine-life/tuimail"
         );
-        assert_eq!(value(&lines, "Version"), "0.2.6 (0123456789ab)");
+        assert_eq!(value(&lines, "Version"), "v0.2.6.3");
+        assert_eq!(value(&lines, "Commit"), "0123456789ab");
         assert_eq!(
             value(&lines, "Built"),
             "Nov 2, 3:14 PM Pacific (2 days ago)"
         );
         assert_eq!(
             value(&lines, "Installed"),
-            r"C:\Program Files\at-home\tuimail\v0.2.6\tuimail.exe"
+            r"C:\Program Files\at-home\tuimail\v0.2.6.3\tuimail.exe"
         );
         assert_eq!(value(&lines, "Checkout"), r"D:\repos\tuimail");
     }
@@ -210,10 +225,8 @@ mod tests {
     #[test]
     fn a_local_build_says_it_isnt_from_ci() {
         let lines = lines_of(UNSTAMPED, false);
-        assert_eq!(
-            value(&lines, "Version"),
-            "0.2.6 (a development build, not from CI)"
-        );
+        assert_eq!(value(&lines, "Version"), "0.2.6-dev");
+        assert_eq!(value(&lines, "Commit"), NOT_FROM_CI);
         assert_eq!(value(&lines, "Built"), NOT_FROM_CI);
         assert_eq!(value(&lines, "Checkout"), NO_CHECKOUT);
     }

@@ -41,7 +41,7 @@ and always:
 
 - `/` opens the palette; typing searches it, Escape closes it, and a command runs
   as its key would. A key read together with others while it's open is typing.
-- `/` then `info` shows Repo, Link, Version, Built, Installed and Checkout. A local
+- `/` then `info` shows Repo, Link, Version, Commit, Built, Installed and Checkout. A local
   build says it isn't from CI; a CI build shows its commit and build time.
 - Resize to a narrow window (60 x 15) and a wide one: the reader moves beside, below
   or in place of the list without losing the selection.

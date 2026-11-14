@@ -89,21 +89,48 @@ jobs:
     # cross-builds together instead of queuing them on the small NAS runner.
     runs-on: [ubuntu-latest, upstairspc-linux]
     timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
+      # v0.2.5.N, Cargo.toml's version and the next number: on main its tag is reserved on
+      # the commit here, before any build is stamped with it (a dispatch again on main
+      # keeps the number). Elsewhere v0.2.5.N-run123, released by no one.
+      - id: version
+        uses: romaine-life/pipeline-templates/actions/release-version@main
+        with:
+          prefix-from: Cargo.toml
+          publish: ${{ github.ref == 'refs/heads/main' }}
+      # The tag starts the Mac build on GitHub (.github/workflows/macos.yml), so the push
+      # mirror carries it now rather than at its interval.
+      - name: Send the tag to GitHub
+        if: steps.version.outputs.tag != ''
+        env:
+          DT: ${{ secrets.PIPELINE_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$DT"
+          printf 'header = "Authorization: token %s"\n' "$DT" | curl -sS --fail-with-body --retry 5 --retry-delay 2 -K - \
+            -X POST "$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY/push_mirrors-sync"
       - uses: romaine-life/pipeline-templates/actions/home-cache@main
       - uses: romaine-life/pipeline-templates/actions/rust-toolchain@main
         with:
           components: clippy, rustfmt
           targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,aarch64-pc-windows-msvc
-      # The palette's info panel: this commit, and when this build was made.
+      # The palette's info panel and --version: this version, its commit, and when this
+      # build was made.
       - name: Stamp the build
         shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
+          test -n "$VERSION"
+          echo "TM_VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "TM_COMMIT=$SOURCE_SHA" >> "$GITHUB_ENV"
           echo "TM_BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - name: Install job-local cross-build tools
@@ -281,9 +308,14 @@ jobs:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
       - uses: romaine-life/pipeline-templates/actions/home-cache@main
-      # The palette's info panel: this commit, and when this build was made.
+      # The palette's info panel and --version: this version, its commit, and when this
+      # build was made.
       - name: Stamp the build
+        env:
+          VERSION: ${{ needs.linux.outputs.version }}
         run: |
+          if (-not $env:VERSION) { throw 'the Linux job gave no version' }
+          "TM_VERSION=$env:VERSION" >> $env:GITHUB_ENV
           "TM_COMMIT=$env:SOURCE_SHA" >> $env:GITHUB_ENV
           "TM_BUILT=$([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))" >> $env:GITHUB_ENV
       - name: Format, lints and offline tests
@@ -477,7 +509,7 @@ jobs:
   release:
     name: Release
     needs: [linux, live, windows, macos]
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: needs.linux.outputs.tag != ''
     runs-on: windows-latest
     timeout-minutes: 10
     outputs:
@@ -489,7 +521,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.SOURCE_SHA }}
-          fetch-depth: 0
       - uses: forgejo/download-artifact@v4
         with:
           name: tuimail-linux
@@ -508,19 +539,11 @@ jobs:
         env:
           FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MACOS_RUN_URL: ${{ needs.macos.outputs.run-url }}
+          # reserved on this commit by the Linux job
+          TAG: ${{ needs.linux.outputs.tag }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $version = [regex]::Match((Get-Content -Raw -LiteralPath Cargo.toml), '(?ms)^\[package\]\r?\n.*?^version = "([^"]+)"').Groups[1].Value
-          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid Cargo package version' }
-          # The first build of a Cargo version is vX.Y.Z; each later one is named from
-          # it, vX.Y.Z-<commits since>-g<commit>.
-          $tag = "v$version"
-          git rev-parse --verify --quiet "refs/tags/$tag" | Out-Null
-          if (-not $LASTEXITCODE) {
-            $tag = git describe --tags --abbrev=7 --match $tag $env:SOURCE_SHA
-            if ($LASTEXITCODE -or -not $tag) { throw "git describe from v$version failed" }
-          }
-          $global:LASTEXITCODE = 0
+          $tag = $env:TAG
           $expected = @(
             'tuimail-x86_64-unknown-linux-gnu.tar.gz',
             'tuimail-aarch64-unknown-linux-gnu.tar.gz',
@@ -555,17 +578,6 @@ jobs:
             }
             throw "$tag already has an incomplete release; refusing to overwrite it"
           } elseif ($releaseCode -ne 404) { throw "Release lookup returned HTTP $releaseCode" }
-          # Forgejo's tag API fails from a release job (run 41; spotify-player saw a 500),
-          # so the tag is pushed with git, through checkout's job credential.
-          $ref = git ls-remote origin "refs/tags/$tag"
-          if ($LASTEXITCODE) { throw "tag lookup for $tag failed" }
-          if (-not $ref) {
-            git push origin "$($env:SOURCE_SHA):refs/tags/$tag"
-            if ($LASTEXITCODE) { throw "creating tag $tag failed" }
-            $ref = git ls-remote origin "refs/tags/$tag"
-            if ($LASTEXITCODE) { throw "tag verification for $tag failed" }
-          }
-          if (($ref -split '\s+')[0] -ne $env:SOURCE_SHA) { throw "$tag is reserved for another commit" }
           $notes = "Built from $env:SOURCE_SHA. Windows executables are signed with the at-terminal certificate. Mac checks and archives: $env:MACOS_RUN_URL"
           $created = Invoke-RestMethod -Method Post "$api/releases" -Headers $headers -ContentType 'application/json' -Body (@{
             tag_name = $tag; target_commitish = $env:SOURCE_SHA; name = $tag; body = $notes; draft = $true
