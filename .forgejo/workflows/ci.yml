@@ -85,9 +85,7 @@ jobs:
   linux:
     name: Linux
     if: github.event_name != 'pull_request'
-    # These are existing labels on the i9's container runner. Keep the three
-    # cross-builds together instead of queuing them on the small NAS runner.
-    runs-on: [ubuntu-latest, upstairspc-linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -228,9 +226,9 @@ jobs:
   live:
     name: Live
     if: github.event_name != 'pull_request'
-    # Jobs here share the network of the runner's own Docker, so a port published
-    # on 127.0.0.1 is reachable. Random ports keep two PRs' runs apart.
-    runs-on: [ubuntu-latest, upstairspc-linux]
+    # Jobs and Docker-in-Docker share the cluster runner pod's network, so ports
+    # published on 127.0.0.1 are reachable. Random ports keep concurrent runs apart.
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
