@@ -1,17 +1,19 @@
-//! Tests against a real mail server: GreenMail in Docker, which speaks
-//! IMAP, POP3 and SMTP over TLS with a certificate of its own (trusted here
-//! the way an account's `certificate` is). Ignored unless asked for:
+//! Tests against a real mail server: GreenMail, which speaks IMAP, POP3 and
+//! SMTP over TLS with a certificate of its own (trusted here the way an
+//! account's `certificate` is). They run where `GREENMAIL_CERT` names that
+//! certificate at build time, as in the CI suite's service job, which starts
+//! GreenMail on the job's network with alice and bob (pipeline-templates
+//! `fleet.json`) and sets `IMAP_HOST`, `IMAPS_PORT` and the rest. Locally:
 //!
 //! ```sh
 //! docker run -d --name tuimail-greenmail -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all
 //!   -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=alice:secret@example.com,bob:secret@example.com
 //!   -Dgreenmail.users.login=email' -p 3465:3465 -p 3993:3993 -p 3995:3995 greenmail/standalone:2.1.3
 //! echo | openssl s_client -connect localhost:3993 2>/dev/null | openssl x509 > /tmp/greenmail.pem
-//! TM_LIVE_CERT=/tmp/greenmail.pem cargo test -- --ignored live:: --test-threads=1
+//! GREENMAIL_CERT=/tmp/greenmail.pem cargo test live::
 //! ```
 //!
-//! One at a time, since they share alice's and bob's mail. CI's Live job
-//! runs them the same way, on the ports `TM_LIVE_*_PORT` name.
+//! They share alice's and bob's mail, so they take turns (`SERVER`).
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -27,17 +29,25 @@ use crate::store::{Flags, Known, Role};
 use crate::worker::{self, Endpoints, Event, Request, Worker};
 use crate::{imap, net};
 
+/// One test at a time: they all read and change alice's and bob's mail.
+static SERVER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn cert() -> PathBuf {
-    PathBuf::from(std::env::var("TM_LIVE_CERT").expect("TM_LIVE_CERT: GreenMail's certificate"))
+    PathBuf::from(std::env::var("GREENMAIL_CERT").expect("GREENMAIL_CERT: GreenMail's certificate"))
 }
 
-/// `usual`, unless GreenMail is published elsewhere, as it is in CI.
+/// GreenMail's address: `localhost`, unless it is elsewhere, as on CI's job network.
+fn host(name: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| "localhost".into())
+}
+
+/// `usual`, unless GreenMail is published elsewhere.
 fn port(name: &str, usual: u16) -> u16 {
     std::env::var(name).map_or(usual, |port| port.parse().expect(name))
 }
 
 fn imap_port() -> u16 {
-    port("TM_LIVE_IMAP_PORT", 3993)
+    port("IMAPS_PORT", 3993)
 }
 
 fn account(user: &str, protocol: Protocol) -> Account {
@@ -46,15 +56,19 @@ fn account(user: &str, protocol: Protocol) -> Account {
         email: format!("{user}@example.com"),
         display_name: format!("{user} Tester"),
         protocol,
-        host: "localhost".into(),
+        host: host(if protocol == Protocol::Imap {
+            "IMAP_HOST"
+        } else {
+            "POP3_HOST"
+        }),
         port: Some(if protocol == Protocol::Imap {
             imap_port()
         } else {
-            port("TM_LIVE_POP3_PORT", 3995)
+            port("POP3S_PORT", 3995)
         }),
         security: Security::Tls,
-        smtp_host: "localhost".into(),
-        smtp_port: Some(port("TM_LIVE_SMTP_PORT", 3465)),
+        smtp_host: host("SMTP_HOST"),
+        smtp_port: Some(port("SMTPS_PORT", 3465)),
         smtp_security: Security::Tls,
         certificate: Some(cert()),
         ..Account::default()
@@ -121,8 +135,9 @@ fn unique(what: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore]
+#[cfg_attr(not(greenmail), ignore = "needs GreenMail: GREENMAIL_CERT (live.rs)")]
 async fn live_imap_sync_read_flag_move_search_and_idle() {
+    let _turn = SERVER.lock().await;
     let (alice, _alice_events) = start(account("alice", Protocol::Imap)).await;
     let (bob, mut events) = start(account("bob", Protocol::Imap)).await;
 
@@ -488,8 +503,9 @@ async fn live_imap_sync_read_flag_move_search_and_idle() {
 }
 
 #[tokio::test]
-#[ignore]
+#[cfg_attr(not(greenmail), ignore = "needs GreenMail: GREENMAIL_CERT (live.rs)")]
 async fn live_pop3_downloads_new_mail_once_and_deletes_when_asked() {
+    let _turn = SERVER.lock().await;
     let (bob, _) = start(account("bob", Protocol::Imap)).await;
     let (alice, mut events) = start(account("alice", Protocol::Pop3)).await;
     let subject = unique("pop");
@@ -558,8 +574,9 @@ async fn live_pop3_downloads_new_mail_once_and_deletes_when_asked() {
 }
 
 #[tokio::test]
-#[ignore]
+#[cfg_attr(not(greenmail), ignore = "needs GreenMail: GREENMAIL_CERT (live.rs)")]
 async fn live_a_wrong_password_asks_again() {
+    let _turn = SERVER.lock().await;
     let (bob, mut events) = start(account("bob", Protocol::Imap)).await;
     bob.creds.set(Secret::new("wrong")).await;
     bob.tx.send(Request::Folders).unwrap();
@@ -576,8 +593,8 @@ async fn live_a_wrong_password_asks_again() {
     assert_eq!(state, worker::State::NeedPassword { refused: true });
 }
 
-/// A TCP proxy to GreenMail's IMAP port that can be cut (every connection
-/// closed, new ones refused) and restored.
+/// A TCP proxy on this machine to GreenMail's IMAP port that can be cut
+/// (every connection closed, new ones refused) and restored.
 struct Proxy {
     port: u16,
     up: Arc<std::sync::atomic::AtomicBool>,
@@ -585,7 +602,7 @@ struct Proxy {
 }
 
 impl Proxy {
-    async fn start(to: u16) -> Self {
+    async fn start(to: (String, u16)) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let up = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -599,10 +616,9 @@ impl Proxy {
                 if !flag.load(std::sync::atomic::Ordering::SeqCst) {
                     continue;
                 }
+                let to = to.clone();
                 let task = tokio::spawn(async move {
-                    if let Ok(mut outbound) =
-                        tokio::net::TcpStream::connect(("127.0.0.1", to)).await
-                    {
+                    if let Ok(mut outbound) = tokio::net::TcpStream::connect(to).await {
                         let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
                     }
                 });
@@ -629,11 +645,13 @@ impl Proxy {
 }
 
 #[tokio::test]
-#[ignore]
+#[cfg_attr(not(greenmail), ignore = "needs GreenMail: GREENMAIL_CERT (live.rs)")]
 async fn live_a_change_made_offline_reaches_the_server_once_back() {
+    let _turn = SERVER.lock().await;
     let (alice, _alice_events) = start(account("alice", Protocol::Imap)).await;
-    let proxy = Proxy::start(imap_port()).await;
+    let proxy = Proxy::start((host("IMAP_HOST"), imap_port())).await;
     let mut through = account("bob", Protocol::Imap);
+    through.host = "127.0.0.1".into();
     through.port = Some(proxy.port);
     let (bob, mut events) = start(through).await;
     let subject = unique("offline");

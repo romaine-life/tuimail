@@ -21,7 +21,7 @@ Arrow keys or vim keys. Passwords in your system's keychain. Nothing loaded from
 
 ---
 
-This is Nelson's fork of [erictran308/tuimail](https://github.com/erictran308/tuimail), with a `terminal` theme that uses the terminal's own background, text and ANSI colors. Its source and releases live on [Forgejo](https://forgejo.romaine.life/romaine-life/tuimail); GitHub mirrors the source and builds the Mac archives.
+This is Nelson's fork of [erictran308/tuimail](https://github.com/erictran308/tuimail), with a `terminal` theme that uses the terminal's own background, text and ANSI colors. Its source and releases live on [Forgejo](https://forgejo.romaine.life/romaine-life/tuimail); GitHub mirrors the source.
 
 ## Why tuimail
 
@@ -46,13 +46,13 @@ This is Nelson's fork of [erictran308/tuimail](https://github.com/erictran308/tu
 
 **1. Install tuimail.** Forgejo requires authentication for release downloads, including this public repository. These commands use the Forgejo credential already stored for Git and download the compiled release.
 
-On macOS or Linux, choose your archive from the table below and run this in Bash. It puts `tuimail` in `~/.local/bin`; the authentication header reaches curl through stdin:
+On Linux, choose your archive from the table below and run this in Bash. It puts `tuimail` in `~/.local/bin`; the authentication header reaches curl through stdin:
 
 ```bash
 (
   set -euo pipefail
   set +x
-  asset=tuimail-aarch64-apple-darwin.tar.gz
+  asset=tuimail-x86_64-unknown-linux-gnu.tar.gz
   forgejo_token=$(printf 'protocol=https\nhost=forgejo.romaine.life\n\n' |
     git credential fill | sed -n 's/^password=//p')
   [ -n "$forgejo_token" ] || { printf 'No stored Forgejo credential found.\n' >&2; exit 1; }
@@ -90,8 +90,6 @@ Set `asset` to the file for your computer. You can also sign into Forgejo in you
 
 | Computer | File |
 | --- | --- |
-| Mac with Apple silicon (M1 or later) | [`tuimail-aarch64-apple-darwin.tar.gz`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-aarch64-apple-darwin.tar.gz) |
-| Mac with Intel | [`tuimail-x86_64-apple-darwin.tar.gz`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-x86_64-apple-darwin.tar.gz) |
 | Linux, x86_64 | [`tuimail-x86_64-unknown-linux-gnu.tar.gz`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-x86_64-unknown-linux-gnu.tar.gz) |
 | Linux, ARM64 | [`tuimail-aarch64-unknown-linux-gnu.tar.gz`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-aarch64-unknown-linux-gnu.tar.gz) |
 | Windows, x86_64 | [`tuimail-x86_64-pc-windows-msvc.zip`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-x86_64-pc-windows-msvc.zip) |
@@ -99,9 +97,8 @@ Set `asset` to the file for your computer. You can also sign into Forgejo in you
 
 - **Windows:** add `%LOCALAPPDATA%\Programs\tuimail` to your `PATH`, or run `tuimail.exe` there from Windows Terminal. A browser download can instead be unzipped into a folder of your choice.
 - **Linux:** needs glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36 or later.
-- **macOS:** if you downloaded the file in a browser instead, macOS blocks the app. Run `xattr -d com.apple.quarantine tuimail` once to allow it.
 
-If `tuimail` isn't found afterwards, add `~/.local/bin` to your `PATH`. The Forgejo release includes `SHA256SUMS` for all six archives and links the successful Mac build for its source commit. Compare a downloaded archive's SHA-256 checksum with its matching line in that file. Windows executables carry the at-terminal Authenticode signature; the release archives do not claim GitHub provenance attestations.
+If `tuimail` isn't found afterwards, add `~/.local/bin` to your `PATH`. The Forgejo release includes `SHA256SUMS` for all four archives. There's no Mac build. Compare a downloaded archive's SHA-256 checksum with its matching line in that file. Windows executables carry the at-terminal Authenticode signature; the release archives do not claim GitHub provenance attestations.
 
 **2. Run it.**
 
@@ -360,7 +357,7 @@ TM_DATA_DIR=$HOME/tm-test cargo run   # a separate data folder (a full path) for
 cargo run -- --demo              # made-up accounts and mail, nothing connects or is sent
 ```
 
-The tests against a real server run against [GreenMail](https://greenmail-mail-test.github.io/greenmail/) in Docker (IMAP, POP3 and SMTP over TLS); the commands are at the top of `src/live.rs`, and the full CI build runs them.
+The tests against a real server run against [GreenMail](https://greenmail-mail-test.github.io/greenmail/) in Docker (IMAP, POP3 and SMTP over TLS); the commands are at the top of `src/live.rs`, and CI runs them on every pull request that changes the code.
 
 Only development builds read a `.env`, and only from the source folder, never the folder they're started from, and only its `TM_*` lines: an installed tuimail ignores it, so a `.env` in a folder you cloned can't change where your mail is kept.
 

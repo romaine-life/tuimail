@@ -1,0 +1,3 @@
+# tuimail.exe carries its C runtime, so it runs on a PC without the Visual C++ redistributable.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

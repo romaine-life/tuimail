@@ -1,6 +1,6 @@
 //! What the palette's "info" panel says: this build's repo (from Cargo.toml),
-//! its version, commit and when it was built (stamped by the full build's CI:
-//! `TM_VERSION`, `TM_COMMIT`, `TM_BUILT`), and where it runs on this PC.
+//! its version, commit and when it was built (stamped by the release suite's build:
+//! `VERSION`, `SOURCE_SHA`, `BUILD_TIME`), and where it runs on this PC.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -12,7 +12,7 @@ const NO_CHECKOUT: &str = "no checkout on this PC";
 
 /// This build's version, wherever tuimail says it: the release CI numbered it
 /// as (v0.2.5.4), or Cargo.toml's with `-dev` for a build not from CI.
-pub const VERSION: &str = match option_env!("TM_VERSION") {
+pub const VERSION: &str = match option_env!("VERSION") {
     Some(version) if !version.is_empty() => version,
     _ => concat!(env!("CARGO_PKG_VERSION"), "-dev"),
 };
@@ -28,8 +28,8 @@ struct Stamps {
 const STAMPS: Stamps = Stamps {
     repo: env!("CARGO_PKG_REPOSITORY"),
     version: VERSION,
-    commit: option_env!("TM_COMMIT"),
-    built: option_env!("TM_BUILT"),
+    commit: option_env!("SOURCE_SHA"),
+    built: option_env!("BUILD_TIME"),
 };
 
 /// Read at start: once an update moves the install's `current` folder, the
@@ -74,11 +74,15 @@ fn lines_from(
     ]
 }
 
+/// `stamp` is the build's time in Unix seconds.
 fn built_line(stamp: &str, now: DateTime<Utc>) -> String {
-    let Ok(built) = DateTime::parse_from_rfc3339(stamp) else {
+    let Some(built) = stamp
+        .parse()
+        .ok()
+        .and_then(|secs| DateTime::from_timestamp(secs, 0))
+    else {
         return format!("couldn't read the build time {stamp:?}");
     };
-    let built = built.to_utc();
     format!(
         "{} Pacific ({})",
         pacific(built).format("%b %-d, %-I:%M %p"),
@@ -162,7 +166,7 @@ mod tests {
         repo: "https://forgejo.romaine.life/romaine-life/tuimail",
         version: "v0.2.6.3",
         commit: Some("0123456789abcdef0123"),
-        built: Some("2026-11-02T23:14:00Z"),
+        built: Some("1793661240"), // 2026-11-02T23:14:00Z
     };
     const UNSTAMPED: Stamps = Stamps {
         version: "0.2.6-dev",
@@ -235,11 +239,11 @@ mod tests {
     fn times_read_in_pacific_and_roughly() {
         // Standard time after November's first Sunday (Nov 1, 2026).
         assert_eq!(
-            built_line("2026-11-09T20:00:00Z", at("2026-11-09T20:00:30Z")),
+            built_line("1794254400", at("2026-11-09T20:00:30Z")),
             "Nov 9, 12:00 PM Pacific (just now)"
         );
         assert_eq!(
-            built_line("2026-07-01T19:00:00Z", at("2026-07-01T21:30:00Z")),
+            built_line("1782932400", at("2026-07-01T21:30:00Z")),
             "Jul 1, 12:00 PM Pacific (2 hours ago)"
         );
         assert_eq!(ago(TimeDelta::minutes(1)), "1 minute ago");
