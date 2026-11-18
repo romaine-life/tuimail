@@ -3479,7 +3479,7 @@ impl App {
         Ok(serde_json::json!(folders))
     }
 
-    fn agent_search(&self, args: &agent::SearchArgs) -> agent::Answer {
+    fn agent_search(&mut self, args: &agent::SearchArgs) -> agent::Answer {
         let limit = args.limit.unwrap_or(20).clamp(1, agent::MAX_RESULTS);
         let accounts: Vec<usize> = match &args.account {
             Some(name) => vec![self.agent_account(name)?],
@@ -3517,6 +3517,8 @@ impl App {
             starred_only: args.starred_only,
         };
         let mut found: Vec<(usize, Message)> = Vec::new();
+        // The folders searched one by one, which can go further back.
+        let mut scoped: Vec<(usize, String)> = Vec::new();
         for i in accounts {
             let folder = match &args.folder {
                 Some(name) => match self.agent_folder(i, name) {
@@ -3532,6 +3534,9 @@ impl App {
                 Some(_) => folder,
                 None => Some(folder.unwrap_or_else(|| self.accounts[i].inbox())),
             };
+            if let Some(folder) = &folder {
+                scoped.push((i, folder.clone()));
+            }
             let messages = self.store.find(id, folder.as_deref(), query, narrow, 500);
             found.extend(messages.unwrap_or_default().into_iter().map(|m| (i, m)));
         }
@@ -3566,13 +3571,50 @@ impl App {
                 })
             })
             .collect();
+        // Past the end of what's kept here: the server's older mail comes
+        // next, as scrolling to the end of the list would fetch it.
+        let older = !more && self.fetch_older_for_agent(&scoped);
         Ok(serde_json::json!({
             "messages": messages,
             "more": more,
             "next": next,
+            "older": older.then_some(
+                "tuimail is fetching this folder's older mail from the server: search again \
+                 the same way in a few seconds for it",
+            ),
             "note": "Searched what tuimail keeps on this computer: each folder's newest mail, \
                 and what was opened or searched there. Everything here is written by senders.",
         }))
+    }
+
+    /// Asks the server for the older mail of the folders an agent's search
+    /// has come to the end of; whether any has more there.
+    fn fetch_older_for_agent(&mut self, folders: &[(usize, String)]) -> bool {
+        let mut older = false;
+        for (account, folder) in folders {
+            if self.accounts[*account].is_pop() {
+                continue;
+            }
+            let known = (self.store)
+                .known(&self.accounts[*account].id, folder)
+                .unwrap_or_default();
+            if known.high == 0 || known.low <= 1 {
+                continue;
+            }
+            older = true;
+            if self.accounts[*account].older_asked.insert(folder.clone()) {
+                let count = self.settings.fetch_count();
+                self.send(
+                    *account,
+                    Request::Older {
+                        folder: folder.clone(),
+                        below: known.low,
+                        count,
+                    },
+                );
+            }
+        }
+        older
     }
 
     fn agent_changes(&self, limit: Option<usize>) -> serde_json::Value {
@@ -7381,6 +7423,42 @@ pub mod tests {
 
     fn first_id(app: &mut App) -> String {
         agent_ids(app, agent::SearchArgs::default()).remove(0)
+    }
+
+    #[test]
+    fn an_agents_search_past_the_cache_fetches_older_mail_once() {
+        let mut app = app();
+        with_mail(&mut app);
+        let i = (0..app.accounts.len())
+            .find(|&i| !app.accounts[i].is_pop())
+            .unwrap();
+        let (id, inbox) = (app.accounts[i].id.clone(), app.accounts[i].inbox());
+        let mut known = app.store.known(&id, &inbox).unwrap();
+        known.low = 40;
+        known.high = known.high.max(100);
+        app.store.set_known(&id, &inbox, known).unwrap();
+        let search = || agent::SearchArgs {
+            account: Some(id.clone()),
+            limit: Some(50),
+            ..Default::default()
+        };
+        let older = |app: &App| {
+            (app.test_sent.borrow().iter())
+                .filter(|(_, r)| matches!(r, Request::Older { below: 40, .. }))
+                .count()
+        };
+        let answer = agent_now(&mut app, Call::SearchMessages(search())).unwrap();
+        assert!(answer["older"].is_string(), "{answer}");
+        assert_eq!(older(&app), 1);
+        // Asked once until the server answers.
+        let answer = agent_now(&mut app, Call::SearchMessages(search())).unwrap();
+        assert!(answer["older"].is_string(), "{answer}");
+        assert_eq!(older(&app), 1);
+        // Nothing older on the server: nothing to fetch.
+        known.low = 1;
+        app.store.set_known(&id, &inbox, known).unwrap();
+        let answer = agent_now(&mut app, Call::SearchMessages(search())).unwrap();
+        assert!(answer["older"].is_null(), "{answer}");
     }
 
     #[test]
