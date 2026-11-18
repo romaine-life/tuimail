@@ -3588,7 +3588,8 @@ impl App {
     }
 
     /// Asks the server for the older mail of the folders an agent's search
-    /// has come to the end of; whether any has more there.
+    /// has come to the end of, or for the mail of one never opened here;
+    /// whether any has more there.
     fn fetch_older_for_agent(&mut self, folders: &[(usize, String)]) -> bool {
         let mut older = false;
         for (account, folder) in folders {
@@ -3598,6 +3599,14 @@ impl App {
             let known = (self.store)
                 .known(&self.accounts[*account].id, folder)
                 .unwrap_or_default();
+            // Never opened here: its mail comes as it would when opened.
+            if known.high == 0 && !self.demo {
+                older = true;
+                if !self.accounts[*account].syncing.contains(folder) {
+                    self.sync_folder(*account, folder);
+                }
+                continue;
+            }
             if known.high == 0 || known.low <= 1 {
                 continue;
             }
@@ -7459,6 +7468,42 @@ pub mod tests {
         app.store.set_known(&id, &inbox, known).unwrap();
         let answer = agent_now(&mut app, Call::SearchMessages(search())).unwrap();
         assert!(answer["older"].is_null(), "{answer}");
+    }
+
+    #[test]
+    fn an_agents_search_of_a_folder_never_opened_fetches_it_once() {
+        let mut app = app();
+        with_mail(&mut app);
+        app.demo = false;
+        let i = (0..app.accounts.len())
+            .find(|&i| !app.accounts[i].is_pop())
+            .unwrap();
+        let id = app.accounts[i].id.clone();
+        let archive = app.accounts[i]
+            .folder_for(Role::Archive)
+            .unwrap()
+            .name
+            .clone();
+        app.store
+            .set_known(&id, &archive, Known::default())
+            .unwrap();
+        let search = || agent::SearchArgs {
+            account: Some(id.clone()),
+            folder: Some("archive".into()),
+            query: Some("anything".into()),
+            ..Default::default()
+        };
+        let syncs = |app: &App| {
+            (app.test_sent.borrow().iter())
+                .filter(|(_, r)| matches!(r, Request::Sync { folder, .. } if *folder == archive))
+                .count()
+        };
+        let answer = agent_now(&mut app, Call::SearchMessages(search())).unwrap();
+        assert!(answer["older"].is_string(), "{answer}");
+        assert_eq!(syncs(&app), 1);
+        let answer = agent_now(&mut app, Call::SearchMessages(search())).unwrap();
+        assert!(answer["older"].is_string(), "{answer}");
+        assert_eq!(syncs(&app), 1, "asked once until the server answers");
     }
 
     #[test]
