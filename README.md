@@ -278,6 +278,7 @@ sidebar_width = 28       # in columns (16 to 50)
 
 agents = false           # let AI agents read and sort your mail (tuimail mcp), while tuimail is open
 confirm_agents = true    # ask before each change an agent makes
+agent_changes_per_hour = 300  # the most messages agents change in an hour (1 to 100000)
 
 # Where `s` saves attachments, if not your Downloads folder:
 # downloads = "/Users/you/Mail attachments"

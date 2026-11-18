@@ -3199,11 +3199,11 @@ impl App {
             .agent_spent
             .iter()
             .fold((0, 0), |(a, b), (_, n, t)| (a + n, b + t));
-        if spent + plan.count() > agent::CHANGES_PER_HOUR {
+        let most = self.settings.agent_changes_per_hour();
+        if spent + plan.count() > most {
             return Err(format!(
-                "Agents have changed {spent} messages in the last hour, and {} is the most: \
-                 wait, or ask the user to do it",
-                agent::CHANGES_PER_HOUR
+                "Agents have changed {spent} messages in the last hour, and {most} is the most \
+                 (the agent_changes_per_hour setting): wait, or ask the user to do it"
             ));
         }
         if trashed + plan.trash > agent::TRASH_PER_HOUR {
@@ -7787,12 +7787,22 @@ pub mod tests {
             agent_now(
                 &mut app,
                 Call::Star(agent::StarArgs {
-                    ids: vec![id],
+                    ids: vec![id.clone()],
                     starred: true,
                 }),
             ),
             "in the last hour",
         );
+        // The user can allow more.
+        app.settings.agent_changes_per_hour = 100_000;
+        let allowed = agent_now(
+            &mut app,
+            Call::Star(agent::StarArgs {
+                ids: vec![id],
+                starred: true,
+            }),
+        );
+        assert!(allowed.is_ok(), "{allowed:?}");
     }
 
     #[cfg(any(unix, windows))]

@@ -53,6 +53,9 @@ pub struct Settings {
     pub agents: bool,
     /// Ask before each change an AI agent makes.
     pub confirm_agents: bool,
+    /// The most messages AI agents change in an hour: at least 1, at most
+    /// 100,000.
+    pub agent_changes_per_hour: usize,
     /// The editor Ctrl-e in the composer opens, with its arguments, the
     /// program as a full path: `["/usr/bin/vim"]`. Default: `$VISUAL` or
     /// `$EDITOR` found on `PATH`, else vi.
@@ -77,6 +80,7 @@ impl Default for Settings {
             downloads: None,
             agents: false,
             confirm_agents: true,
+            agent_changes_per_hour: crate::agent::CHANGES_PER_HOUR,
             editor: Vec::new(),
         }
     }
@@ -122,6 +126,11 @@ impl Settings {
     /// How many messages a folder starts with.
     pub fn fetch_count(&self) -> u32 {
         self.fetch_count.clamp(20, 5000)
+    }
+
+    /// How many messages agents may change in an hour.
+    pub fn agent_changes_per_hour(&self) -> usize {
+        self.agent_changes_per_hour.clamp(1, 100_000)
     }
 
     pub fn sidebar_width(&self) -> u16 {
@@ -193,7 +202,7 @@ pub fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
 }
 
 /// The settings tuimail reads.
-const KNOWN: [&str; 16] = [
+const KNOWN: [&str; 17] = [
     "theme",
     "icons",
     "notifications",
@@ -209,6 +218,7 @@ const KNOWN: [&str; 16] = [
     "downloads",
     "agents",
     "confirm_agents",
+    "agent_changes_per_hour",
     "editor",
 ];
 

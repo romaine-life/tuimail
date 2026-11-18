@@ -35,7 +35,8 @@ pub const MAX_RESULTS: usize = 50;
 pub const TEXT_CHARS: usize = 8_000;
 /// The most of a message's text that's returned.
 pub const MAX_TEXT_CHARS: usize = 20_000;
-/// The most messages agents change in an hour, and move to Trash.
+/// The most messages agents change in an hour (the default of the
+/// `agent_changes_per_hour` setting), and move to Trash.
 pub const CHANGES_PER_HOUR: usize = 300;
 pub const TRASH_PER_HOUR: usize = 100;
 /// The most messages agents' reads download in an hour, and bytes: they're
