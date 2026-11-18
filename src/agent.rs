@@ -3,8 +3,11 @@
 //! data folder, and tuimail answers (`App::on_agent`): it reads from its
 //! cache, and changes mail as the user's own keys do, on the screen, kept
 //! as changes that can be undone (`z`, `Z`), and asking the user first
-//! unless the settings say not to. Nothing is ever deleted for good and
-//! nothing is sent: there's no call for it.
+//! unless the settings say not to. Nothing is ever deleted for good:
+//! there's no call for it. The one call that reaches past the user's mail
+//! is `unsubscribe`, which unsubscribes as the message says (one click, or
+//! a message to the list's one address: `unsubscribe.rs`), asked first as
+//! changes are; nothing else is sent, and no link is opened.
 //!
 //! tuimail listens only while the "AI agents" setting is on. The socket is
 //! in the data folder (only the user's), is made only the user's, and a
@@ -43,6 +46,8 @@ pub const TRASH_PER_HOUR: usize = 100;
 /// the user's connection and bandwidth.
 pub const DOWNLOADS_PER_HOUR: usize = 200;
 pub const DOWNLOAD_BYTES_PER_HOUR: u64 = 512 << 20;
+/// The most messages agents unsubscribe from in an hour.
+pub const UNSUBSCRIBES_PER_HOUR: usize = 200;
 /// How long a change waits for the user's `y`.
 pub const ASK_FOR: Duration = Duration::from_secs(5 * 60);
 
@@ -70,10 +75,12 @@ pub enum Call {
     MoveToTrash(IdsArgs),
     ListChanges(ChangesArgs),
     UndoChange(UndoArgs),
+    Unsubscribe(IdsArgs),
 }
 
 impl Call {
-    /// Whether it changes mail.
+    /// Whether it changes mail, or acts for the user (unsubscribing):
+    /// checked, and asked about first, as changes are.
     pub fn changes(&self) -> bool {
         matches!(
             self,
@@ -84,6 +91,7 @@ impl Call {
                 | Call::MarkSpam(_)
                 | Call::MoveToTrash(_)
                 | Call::UndoChange(_)
+                | Call::Unsubscribe(_)
         )
     }
 }
@@ -937,6 +945,8 @@ mod tests {
         assert!(call(r#"{"tool":"list_accounts"}"#).is_ok());
         assert!(call(r#"{"tool":"list_accounts","delete":true}"#).is_err());
         assert!(call(r#"{"tool":"move_to_trash","ids":[],"forever":true}"#).is_err());
+        assert!(call(r#"{"tool":"unsubscribe","ids":["a"]}"#).is_ok());
+        assert!(call(r#"{"tool":"unsubscribe","ids":["a"],"url":"https://x.example"}"#).is_err());
     }
 
     #[test]

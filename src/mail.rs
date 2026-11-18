@@ -261,6 +261,11 @@ pub fn parse(raw: &[u8]) -> Option<Parsed> {
 
 /// The first https or mailto link of List-Unsubscribe.
 fn unsubscribe_link(value: &HeaderValue) -> Option<String> {
+    unsubscribe_links(value).into_iter().next()
+}
+
+/// List-Unsubscribe's https and mailto links, in its order.
+fn unsubscribe_links(value: &HeaderValue) -> Vec<String> {
     let links: Vec<String> = match value {
         HeaderValue::Address(address) => address
             .iter()
@@ -277,8 +282,53 @@ fn unsubscribe_link(value: &HeaderValue) -> Option<String> {
                 .map(|s| s.trim().trim_matches(['<', '>']).to_string())
                 .collect::<Vec<_>>()
         })
-        .find(|l| l.starts_with("https://") || l.starts_with("mailto:"))
+        .filter(|l| l.starts_with("https://") || l.starts_with("mailto:"))
         .filter(|l| l.len() < 2000 && usable_link(l))
+        .take(10)
+        .collect()
+}
+
+/// How a message says it can be unsubscribed from: List-Unsubscribe's
+/// links (RFC 2369) and whether List-Unsubscribe-Post offers one click
+/// (RFC 8058).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Unsubscribe {
+    /// The first https link.
+    pub https: Option<String>,
+    /// The first mailto link.
+    pub mailto: Option<String>,
+    /// List-Unsubscribe-Post is exactly `List-Unsubscribe=One-Click`: a
+    /// POST of that to the https link unsubscribes, with no page to read.
+    pub one_click: bool,
+}
+
+/// What a message's head says about unsubscribing. Only the head is
+/// parsed.
+pub fn unsubscribe_of(raw: &[u8]) -> Unsubscribe {
+    let end = (raw.windows(4).position(|w| {
+        w == b"
+
+"
+    }))
+    .or_else(|| {
+        raw.windows(2).position(|w| {
+            w == b"
+
+"
+        })
+    })
+    .map_or(raw.len(), |end| end + 2);
+    let Some(message) = MessageParser::default().parse_headers(&raw[..end]) else {
+        return Unsubscribe::default();
+    };
+    let links = unsubscribe_links(message.list_unsubscribe());
+    let first = |scheme: &str| links.iter().find(|l| l.starts_with(scheme)).cloned();
+    let post = message.header_raw("List-Unsubscribe-Post").map(str::trim);
+    Unsubscribe {
+        https: first("https://"),
+        mailto: first("mailto:"),
+        one_click: post == Some(crate::unsubscribe::ONE_CLICK),
+    }
 }
 
 /// The start of a message's text for the list. Lays out HTML, so it runs

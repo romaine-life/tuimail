@@ -6,6 +6,7 @@ mod composer;
 mod config;
 mod demo;
 mod fzt;
+mod http;
 mod icons;
 mod imap;
 mod info;
@@ -30,6 +31,7 @@ mod theme;
 mod threads;
 mod tools;
 mod ui;
+mod unsubscribe;
 mod utf7;
 mod worker;
 

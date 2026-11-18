@@ -27,6 +27,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use crate::account::{Account, Auth, Security};
+use crate::http;
 use crate::logfile::{self, Class};
 use crate::net::{self, Endpoint};
 use crate::secrets::Secret;
@@ -42,9 +43,8 @@ pub const GOOGLE_CLIENT_SECRET: &str = "";
 
 /// How long the browser has to come back.
 pub const SIGN_IN_FOR: Duration = Duration::from_secs(5 * 60);
-/// Requests to the provider: their time limit and the most read.
+/// Requests to the provider: their time limit (`http.rs` caps what's read).
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_RESPONSE: usize = 256 << 10;
 /// The longest token taken.
 const MAX_TOKEN: usize = 16 << 10;
 /// An access token is renewed this long before it runs out.
@@ -456,7 +456,7 @@ async fn token_request(provider: Provider, params: &[(&str, &str)]) -> Result<To
     let mut conn = net::connect(&endpoint).await?;
     let (status, body) = tokio::time::timeout(
         HTTP_TIMEOUT,
-        post_form(&mut conn, host, path, &form(params)),
+        http::post_form(&mut conn, host, path, "application/json", &form(params)),
     )
     .await
     .map_err(|_| Class::Timeout.with(format!("{host} didn't answer in time")))??;
@@ -511,99 +511,6 @@ fn tokens_from(provider: Provider, status: u16, body: &[u8]) -> Result<Tokens> {
         refresh,
         renew_at: Instant::now() + lasts.saturating_sub(EARLY),
     })
-}
-
-/// POSTs a form and reads the answer: its status and body. HTTP/1.1, the
-/// connection closed after; the answer at most [`MAX_RESPONSE`].
-async fn post_form<S: AsyncRead + AsyncWrite + Unpin>(
-    stream: &mut S,
-    host: &str,
-    path: &str,
-    body: &str,
-) -> Result<(u16, Vec<u8>)> {
-    let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: tuimail\r\n\
-         Accept: application/json\r\nContent-Type: application/x-www-form-urlencoded\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    stream.write_all(request.as_bytes()).await?;
-    stream.flush().await?;
-    let mut answer = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        let n = match stream.read(&mut chunk).await {
-            Ok(n) => n,
-            // TLS closed without its close_notify, as some servers do:
-            // what came is all there is.
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => 0,
-            Err(e) => return Err(e.into()),
-        };
-        if n == 0 {
-            break;
-        }
-        answer.extend_from_slice(&chunk[..n]);
-        if answer.len() > MAX_RESPONSE {
-            bail!("{host}'s answer is too long");
-        }
-    }
-    parse_response(&answer)
-}
-
-/// An HTTP/1.1 answer's status and body (by its length, its chunks, or
-/// all that came).
-fn parse_response(answer: &[u8]) -> Result<(u16, Vec<u8>)> {
-    let end = answer
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .context("the answer has no end of its head")?;
-    let head = String::from_utf8_lossy(&answer[..end]);
-    let rest = &answer[end + 4..];
-    let mut lines = head.split("\r\n");
-    let status = lines
-        .next()
-        .and_then(|l| l.strip_prefix("HTTP/1."))
-        .and_then(|l| l.get(2..5))
-        .and_then(|s| s.parse::<u16>().ok())
-        .context("the answer has no status")?;
-    let header = |name: &str| {
-        head.split("\r\n").skip(1).find_map(|l| {
-            let (k, v) = l.split_once(':')?;
-            k.trim()
-                .eq_ignore_ascii_case(name)
-                .then(|| v.trim().to_string())
-        })
-    };
-    let body = if header("transfer-encoding").is_some_and(|t| t.eq_ignore_ascii_case("chunked")) {
-        unchunk(rest)?
-    } else if let Some(length) = header("content-length").and_then(|l| l.parse::<usize>().ok()) {
-        rest.get(..length)
-            .context("the answer is cut short")?
-            .to_vec()
-    } else {
-        rest.to_vec()
-    };
-    Ok((status, body))
-}
-
-/// A chunked body put back together.
-fn unchunk(mut rest: &[u8]) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    loop {
-        let line_end = rest
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .context("a chunk has no size")?;
-        let size_text = String::from_utf8_lossy(&rest[..line_end]);
-        let size_text = size_text.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_text, 16).context("a chunk's size didn't read")?;
-        rest = &rest[line_end + 2..];
-        if size == 0 {
-            return Ok(out);
-        }
-        out.extend_from_slice(rest.get(..size).context("a chunk is cut short")?);
-        rest = rest.get(size + 2..).context("a chunk is cut short")?;
-    }
 }
 
 /// 32 random bytes, base64url: a PKCE verifier, or a state.
@@ -776,27 +683,6 @@ mod tests {
     }
 
     #[test]
-    fn answers_are_read_by_length_chunks_or_to_the_end() {
-        let plain = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello and more";
-        assert_eq!(parse_response(plain).unwrap(), (200, b"hello".to_vec()));
-        let chunked = b"HTTP/1.1 400 Bad Request\r\nTransfer-Encoding: chunked\r\n\r\n\
-            4\r\n{\"a\"\r\n3;x=y\r\n:1}\r\n0\r\n\r\n";
-        assert_eq!(
-            parse_response(chunked).unwrap(),
-            (400, b"{\"a\":1}".to_vec())
-        );
-        let open = b"HTTP/1.0 200 OK\r\n\r\nall of it";
-        assert_eq!(parse_response(open).unwrap(), (200, b"all of it".to_vec()));
-        for bad in [
-            &b"garbage"[..],
-            b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\nshort",
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n",
-        ] {
-            assert!(parse_response(bad).is_err());
-        }
-    }
-
-    #[test]
     fn a_refusal_is_its_code_and_not_the_providers_words() {
         use crate::logfile::tests::{assert_kept_out, private_words};
         let answer = |error: &str| {
@@ -836,33 +722,6 @@ mod tests {
             assert!(tokens_from(Provider::Google, 200, bad).is_err());
         }
         assert!(tokens_from(Provider::Google, 500, br#"{"access_token":"x"}"#).is_err());
-    }
-
-    #[tokio::test]
-    async fn a_form_is_posted_and_its_answer_read() {
-        let (mut client, mut server) = tokio::io::duplex(64 << 10);
-        let serve = tokio::spawn(async move {
-            // The head and the short body come together.
-            let request = read_head(&mut server, 8 << 10).await.unwrap();
-            server
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
-                .await
-                .unwrap();
-            drop(server);
-            let (head, body) = request.split_once("\r\n\r\n").unwrap();
-            (head.to_string(), body.to_string())
-        });
-        let answer = post_form(&mut client, "login.example", "/token", "a=1")
-            .await
-            .unwrap();
-        assert_eq!(answer, (200, b"{}".to_vec()));
-        let (head, body) = serve.await.unwrap();
-        assert!(
-            head.starts_with("POST /token HTTP/1.1\r\nHost: login.example\r\n"),
-            "{head}"
-        );
-        assert!(head.contains("Content-Length: 3\r\n"));
-        assert_eq!(body, "a=1");
     }
 
     #[tokio::test]

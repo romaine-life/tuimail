@@ -36,7 +36,7 @@ This is Nelson's fork of [erictran308/tuimail](https://github.com/erictran308/tu
 - **Conversations.** Replies sit under what they answer, the conversation with the newest message first, so a thread reads top to bottom. They're worked out from the messages themselves, the same for every server and POP3; turn them off in the settings (`O`) for a plain newest-first list.
 - **Tags.** Put `work`, `receipts` or any word on a message with `t`. IMAP accounts keep them on the server as keywords, spelled the way Thunderbird spells its tags, so the two show each other's; POP3 accounts keep them on your computer. (Gmail keeps them too, but its website shows only its labels.)
 - **Search.** `/`, then `search` and `Enter`, finds mail by sender, recipients, subject or text: at once in what's on your computer, then on the server, which searches whole messages. `tag:work` finds what's tagged.
-- **AI agents, on your terms.** Claude Code, Claude Desktop, Cursor or any MCP client can read and sort your mail through `tuimail mcp`: mark, star, tag, move, mark spam, move to Trash. Each change asks you first (unless you say not to), shows on the screen and undoes with `z`. Agents can't delete anything for good, send, or open links.
+- **AI agents, on your terms.** Claude Code, Claude Desktop, Cursor or any MCP client can read and sort your mail through `tuimail mcp`: mark, star, tag, move, mark spam, move to Trash, and unsubscribe you from mailing lists when you ask. Each change asks you first (unless you say not to), shows on the screen and undoes with `z`. Agents can't delete anything for good, write mail, or open links.
 - **Works offline.** Headers and the messages you've opened are kept in a local cache, so the list and what you've read are there without a connection.
 - **Set up in a minute.** Type your address and password: the servers fill in for Gmail, iCloud, Outlook, Yahoo, Fastmail, Proton (through its Bridge), Zoho, GMX, WEB.DE, Yandex, Mail.ru, Posteo, mailbox.org and more, or are guessed for others. tuimail logs in to check before saving.
 - **Make it yours.** Catppuccin, Tokyo Night, Dracula, Gruvbox, Nord and Rosé Pine themes (picked in the settings, `O`), and Nerd Font icons where your terminal has them.
@@ -301,13 +301,21 @@ agent_changes_per_hour = 300  # the most messages agents change in an hour (1 to
   { "mcpServers": { "tuimail": { "command": "/Users/you/.local/bin/tuimail", "args": ["mcp"] } } }
   ```
 
-**What agents can do:** list accounts and folders, search what tuimail has on your computer, read a message (its links, wherever they are, shown only by their site), mark read or unread, star, tag, move to a folder of yours, mark spam or not (to Junk and back), move to Trash, and undo their own changes.
+**What agents can do:** list accounts and folders, search what tuimail has on your computer, read a message (its links, wherever they are, shown only by their site), mark read or unread, star, tag, move to a folder of yours, mark spam or not (to Junk and back), move to Trash, undo their own changes, and unsubscribe you from mailing lists.
 
-**What they can't:** delete anything for good (mail already in Trash stays there, and an account without a Trash folder takes nothing), move mail into Drafts or Sent, see or touch other users' or shared folders, send, reply or forward, open links or unsubscribe, read attachments, make filters, change settings, or touch passwords. There are no tools for these; tuimail refuses them whatever an agent asks.
+**Unsubscribing** does only what the list's own message offers, and can't be undone:
+
+- Where the message offers one-click unsubscribing (RFC 8058), tuimail sends the list's site that one request, `List-Unsubscribe=One-Click`, and nothing else: no page is opened, nothing on it is loaded, no redirect is followed, and only an https site on the internet is asked.
+- Otherwise, where it gives an address, tuimail sends "unsubscribe" to that one address, from the account the message came to, and keeps a copy in Sent.
+- A list that unsubscribes only on its web page is left to you: tuimail asks whether to open it, as `U` does, and the agent is told it's yours.
+- The agent hears, for each message, which of these it was, the site or the address's domain, and how it went. At most 200 messages an hour.
+- Unsubscribing from real spam tells the spammer your address is read: agents are told to mark spam instead, and to unsubscribe only when you ask.
+
+**What they can't:** delete anything for good (mail already in Trash stays there, and an account without a Trash folder takes nothing), move mail into Drafts or Sent, see or touch other users' or shared folders, write, reply or forward, open links, read attachments, make filters, change settings, or touch passwords. There are no tools for these; tuimail refuses them whatever an agent asks.
 
 **You stay in charge:**
 
-- Each change waits for your `y` in tuimail; any other key says no. Once you trust your agent, turn off **Ask before each change an agent makes** in the settings: changes are then made at once, and said on the status line and in a notification.
+- Each change, and each unsubscribe, waits for your `y` in tuimail; any other key says no. Once you trust your agent, turn off **Ask before each change an agent makes** in the settings: changes are then made at once, and said on the status line and in a notification.
 - Every change is listed with who made it (`Z`), and `z` undoes it as it undoes yours.
 - At most 50 messages a call, 300 changes and 100 moves to Trash or Junk an hour, and 200 messages (512 MB) downloaded for agents' reads.
 - Turning agents off, in any tuimail window or in `settings.toml`, stops every tuimail answering them.

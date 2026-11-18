@@ -496,7 +496,11 @@ fn confirm(frame: &mut Frame, app: &App, area: Rect) {
             for line in &ask.which {
                 text.push_str(&format!("\n  {}", fit(line, 70)));
             }
-            text.push_str("\nYou can undo it later with z.");
+            text.push_str(if ask.undoable {
+                "\nYou can undo it later with z."
+            } else {
+                "\nThis can't be undone: each list is told by its own link or address."
+            });
             (
                 " An AI agent asks ",
                 text,
@@ -567,10 +571,15 @@ fn confirm(frame: &mut Frame, app: &App, area: Rect) {
             ),
             " `y` open · any other key cancels ",
         ),
-        Confirm::OpenLink { url } => (
+        Confirm::OpenLink { url, asked_by } => (
             " Unsubscribe? ",
             format!(
-                "Open the list's unsubscribe page on {}?\n  {}",
+                "{}Open the list's unsubscribe page on {}?\n  {}",
+                asked_by.as_ref().map_or(String::new(), |who| format!(
+                    "{} (an AI agent, as it calls itself) asked to unsubscribe you from a list \
+                     that unsubscribes on its web page.\n",
+                    fit(who, 40)
+                )),
                 fit_middle(&crate::app::link_host(url), 50),
                 fit_middle(url, 60)
             ),

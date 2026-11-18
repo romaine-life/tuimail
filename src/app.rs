@@ -30,6 +30,7 @@ use crate::settings::Settings;
 use crate::setup::{self, Setup};
 use crate::store::{self, Change, Changed, Flags, Folder, Known, Message, Role, Store, What};
 use crate::theme::{self, Colors};
+use crate::unsubscribe::{self, Way};
 use crate::worker::{self, Endpoints, Request, State, Worker};
 use crate::{fzt, info, net, tags, text, tools};
 
@@ -73,6 +74,13 @@ pub enum AppEvent {
     Worker {
         account: String,
         event: worker::Event,
+    },
+    /// An agent's one-click unsubscribe ([`App::agent_unsubscribe`]'s
+    /// `batch`, its `n`th message) was made, or wasn't.
+    Unsubscribed {
+        batch: u64,
+        n: usize,
+        result: Result<(), String>,
     },
     /// The SMTP server took the message, or didn't.
     Sent {
@@ -148,6 +156,8 @@ pub struct SentCopy {
     pub to: Vec<Addr>,
     pub replying: Option<Kept>,
     pub draft_of: Option<Kept>,
+    /// An agent's unsubscribe sends it: its batch and place there.
+    pub agent: Option<(u64, usize)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -347,6 +357,8 @@ pub struct AgentAsk {
     pub what: String,
     /// The messages: sender and subject, a line each (a few).
     pub which: Vec<String>,
+    /// `z` can undo it (an unsubscribe can't be).
+    pub undoable: bool,
     call: Call,
     reply: tokio::sync::oneshot::Sender<agent::Answer>,
     at: Instant,
@@ -357,6 +369,21 @@ struct AgentRead {
     key: (usize, String, u32),
     max: usize,
     reply: tokio::sync::oneshot::Sender<agent::Answer>,
+    at: Instant,
+}
+
+/// An agent's unsubscribe, let through: answered once every message's
+/// is done.
+struct AgentUnsubscribe {
+    who: String,
+    reply: tokio::sync::oneshot::Sender<agent::Answer>,
+    /// Each message's answer, in the call's order: `id`, then `way` and
+    /// `site`, then `done` and `outcome`.
+    results: Vec<serde_json::Value>,
+    /// Messages being downloaded: their place in `results`, and key.
+    downloading: Vec<(usize, (usize, String, u32))>,
+    /// How many have no outcome yet.
+    left: usize,
     at: Instant,
 }
 
@@ -382,6 +409,8 @@ enum Action {
     Tag(String, bool),
     Move,
     Undo(Box<Change>),
+    /// These messages' lists, in the call's order.
+    Unsubscribe(Vec<(usize, String, u32)>),
 }
 
 impl Plan {
@@ -395,10 +424,12 @@ impl Plan {
         }
     }
 
-    /// How many messages it changes.
+    /// How many messages it changes. Unsubscribing changes none: it has
+    /// its own hourly limit.
     fn count(&self) -> usize {
         match &self.action {
             Action::Undo(change) => change.messages.len(),
+            Action::Unsubscribe(_) => 0,
             _ => self.groups.iter().map(|g| g.uids.len()).sum(),
         }
     }
@@ -450,9 +481,11 @@ pub enum Confirm {
         name: String,
     },
     RemoveAccount(usize),
-    /// `U`'s web page, shown before it opens.
+    /// `U`'s web page, shown before it opens; or one an agent's
+    /// unsubscribe left to the user, `asked_by` that agent.
     OpenLink {
         url: String,
+        asked_by: Option<String>,
     },
     /// Quit with changes not yet made on the server.
     Quit {
@@ -582,6 +615,11 @@ pub struct App {
     /// Agents' changes in the last hour: when, how many messages, how
     /// many to Trash (the hourly limits).
     agent_spent: VecDeque<(Instant, usize, usize)>,
+    /// Agents' unsubscribes on their way, by batch.
+    agent_unsubscribes: HashMap<u64, AgentUnsubscribe>,
+    next_unsubscribe: u64,
+    /// Messages agents unsubscribed from, and when (the hourly limit).
+    agent_unsubscribed: VecDeque<Instant>,
     pub picker: Option<Picker>,
     pub confirm: Option<Confirm>,
     confirm_at: Instant,
@@ -753,6 +791,9 @@ impl App {
             agent_downloads: HashMap::new(),
             agent_fetched: VecDeque::new(),
             agent_spent: VecDeque::new(),
+            agent_unsubscribes: HashMap::new(),
+            next_unsubscribe: 0,
+            agent_unsubscribed: VecDeque::new(),
             picker: None,
             confirm: None,
             confirm_at: Instant::now(),
@@ -1138,6 +1179,10 @@ impl App {
                     self.on_worker(i, event);
                 }
             }
+            AppEvent::Unsubscribed { batch, n, result } => match result {
+                Ok(()) => self.unsubscribe_done(batch, n, true, "Unsubscribed with one click"),
+                Err(e) => self.unsubscribe_done(batch, n, false, &format!("Not unsubscribed: {e}")),
+            },
             AppEvent::Sent {
                 account,
                 result,
@@ -1345,6 +1390,7 @@ impl App {
                         for read in self.agent_reads_for(&key) {
                             self.agent_render(read.key, raw.clone(), read.max, read.reply);
                         }
+                        self.unsubscribe_downloaded(&key, Ok(&raw));
                         let raw = Arc::new(raw);
                         self.make_previews(i, vec![(folder.clone(), uid, raw.clone())]);
                         if self.reader.as_ref().is_some_and(|r| r.key() == key) {
@@ -1365,6 +1411,7 @@ impl App {
                         for read in self.agent_reads_for(&key) {
                             let _ = read.reply.send(Err(gone.into()));
                         }
+                        self.unsubscribe_downloaded(&key, Err(gone));
                         if let Some(reader) = self.reader.as_mut().filter(|r| r.key() == key) {
                             reader.error = Some(gone.into());
                         }
@@ -1374,6 +1421,7 @@ impl App {
                         for read in self.agent_reads_for(&key) {
                             let _ = read.reply.send(Err(e.clone()));
                         }
+                        self.unsubscribe_downloaded(&key, Err(&e));
                         if let Some(reader) = self.reader.as_mut().filter(|r| r.key() == key) {
                             reader.error = Some(e.clone());
                         }
@@ -2875,6 +2923,10 @@ impl App {
             for read in std::mem::take(&mut self.agent_reads) {
                 let _ = read.reply.send(Err("The user turned AI agents off".into()));
             }
+            // What's on its way still happens; the agent isn't told.
+            for (_, u) in self.agent_unsubscribes.drain() {
+                let _ = u.reply.send(Err("The user turned AI agents off".into()));
+            }
             if matches!(self.confirm, Some(Confirm::Agent { .. })) {
                 self.confirm = None;
             }
@@ -2923,11 +2975,15 @@ impl App {
                         who,
                         what: plan.what,
                         which,
+                        undoable: !matches!(plan.action, Action::Unsubscribe(_)),
                         call,
                         reply,
                         at: Instant::now(),
                     });
                     self.ask_agents();
+                }
+                Ok(plan) if matches!(plan.action, Action::Unsubscribe(_)) => {
+                    self.agent_unsubscribe(who, plan, reply)
                 }
                 Ok(plan) => {
                     let answer = self.agent_apply(&who, plan);
@@ -2979,16 +3035,42 @@ impl App {
                 ));
             }
         }
-        let free = self.confirm.is_none()
+        // Unsubscribes nobody waits for are dropped (what's on its way
+        // still happens); messages that didn't download, and what isn't
+        // done by the time a question would have run out, are answered.
+        self.agent_unsubscribes.retain(|_, u| !u.reply.is_closed());
+        let (mut undownloaded, mut late) = (Vec::new(), Vec::new());
+        for (&batch, u) in &mut self.agent_unsubscribes {
+            if u.at.elapsed() >= Duration::from_secs(60) {
+                undownloaded.extend(u.downloading.drain(..).map(|(n, _)| (batch, n)));
+            }
+            if u.at.elapsed() >= agent::ASK_FOR {
+                late.extend((0..u.results.len()).map(|n| (batch, n)));
+            }
+        }
+        for (batch, n) in undownloaded {
+            let why = "The message didn't download in time: tuimail may be offline";
+            self.unsubscribe_done(batch, n, false, why);
+        }
+        for (batch, n) in late {
+            self.unsubscribe_done(batch, n, false, "It didn't finish in time");
+        }
+        if self.nothing_open()
+            && let Some(ask) = self.agent_asks.front()
+        {
+            let id = ask.id;
+            self.confirm(Confirm::Agent { id });
+        }
+    }
+
+    /// Nothing is open that a question would cover, or take keys from.
+    fn nothing_open(&self) -> bool {
+        self.confirm.is_none()
             && self.composer.is_none()
             && self.setup.is_none()
             && self.prompt.is_none()
             && self.picker.is_none()
-            && self.help.is_none();
-        if free && let Some(ask) = self.agent_asks.front() {
-            let id = ask.id;
-            self.confirm(Confirm::Agent { id });
-        }
+            && self.help.is_none()
     }
 
     /// The user's answer to an agent's change: made if `yes` (checked
@@ -3001,8 +3083,12 @@ impl App {
         let answer = if yes {
             self.agent_spent
                 .retain(|(at, ..)| at.elapsed() < Duration::from_secs(3600));
-            self.agent_plan(&ask.call)
-                .and_then(|plan| self.agent_apply(&ask.who, plan))
+            match self.agent_plan(&ask.call) {
+                Ok(plan) if matches!(plan.action, Action::Unsubscribe(_)) => {
+                    return self.agent_unsubscribe(ask.who, plan, ask.reply);
+                }
+                planned => planned.and_then(|plan| self.agent_apply(&ask.who, plan)),
+            }
         } else {
             self.info(format!("{} wasn't let {}", ask.who, ask.what));
             Err(
@@ -3182,6 +3268,28 @@ impl App {
                     trash,
                     ..Plan::new(Action::Undo(Box::new(change)), Vec::new(), what)
                 }
+            }
+            Call::Unsubscribe(args) => {
+                let groups = self.agent_groups(&args.ids)?;
+                let mut keys: Vec<(usize, String, u32)> = Vec::new();
+                for key in args.ids.iter().filter_map(|id| self.agent_key(id)) {
+                    if !keys.contains(&key) {
+                        keys.push(key);
+                    }
+                }
+                let hour = Duration::from_secs(3600);
+                let done = (self.agent_unsubscribed.iter())
+                    .filter(|at| at.elapsed() < hour)
+                    .count();
+                if done + keys.len() > agent::UNSUBSCRIBES_PER_HOUR {
+                    return Err(format!(
+                        "Agents have unsubscribed from {done} messages' lists in the last hour, \
+                         and {} is the most: wait, or ask the user to do it",
+                        agent::UNSUBSCRIBES_PER_HOUR
+                    ));
+                }
+                let what = format!("unsubscribe you from the mailing lists of {}", n(&groups));
+                Plan::new(Action::Unsubscribe(keys), groups, what)
             }
             _ => return Err("That doesn't change mail".into()),
         };
@@ -3434,6 +3542,8 @@ impl App {
                     self.move_messages(g.account, &g.folder, &g.uids, to);
                 }
             }
+            // Not a change: `agent_unsubscribe` makes it, and answers later.
+            Action::Unsubscribe(_) => return Err("That isn't a change".into()),
         }
         if let Some(change) = self.change.as_mut() {
             change.who = who.to_string();
@@ -3667,46 +3777,277 @@ impl App {
             _ if self.accounts[key.0].is_pop() || self.demo => {
                 let _ = reply.send(Err("This message's text isn't on this computer".into()));
             }
-            _ => {
-                // One download per message, joined by every read waiting
-                // for it (a retry after an answer in time ran out too),
-                // within the hourly limits.
-                (self.agent_downloads).retain(|_, at| at.elapsed() < AGENT_DOWNLOAD_FOR);
-                if !self.agent_downloads.contains_key(&key) {
-                    let hour = Duration::from_secs(3600);
-                    self.agent_fetched.retain(|(at, _)| at.elapsed() < hour);
-                    let size = (self.store.message(&id, &key.1, key.2).ok().flatten())
-                        .map_or(0, |m| u64::from(m.size));
-                    let bytes: u64 = self.agent_fetched.iter().map(|(_, b)| b).sum();
-                    if self.agent_fetched.len() >= agent::DOWNLOADS_PER_HOUR
-                        || bytes + size > agent::DOWNLOAD_BYTES_PER_HOUR
-                    {
-                        let _ = reply.send(Err(
-                            "Agents have downloaded as much mail as they may this hour: \
-                             wait, or ask the user to open it"
-                                .into(),
-                        ));
-                        return;
-                    }
-                    self.agent_fetched.push_back((Instant::now(), size));
-                    self.agent_downloads.insert(key.clone(), Instant::now());
-                    self.send(
-                        key.0,
-                        Request::Body {
-                            folder: key.1.clone(),
-                            uid: key.2,
-                            uidvalidity: self.uidvalidity(key.0, &key.1),
-                        },
-                    );
+            _ => match self.agent_download(&key) {
+                Err(e) => {
+                    let _ = reply.send(Err(e));
                 }
-                self.agent_reads.push(AgentRead {
+                Ok(()) => self.agent_reads.push(AgentRead {
                     key,
                     max,
                     reply,
                     at: Instant::now(),
-                });
+                }),
+            },
+        }
+    }
+
+    /// Downloads a message for agents: once, joined by every read or
+    /// unsubscribe waiting for it (a retry after an answer in time ran out
+    /// too), within the hourly limits.
+    fn agent_download(&mut self, key: &(usize, String, u32)) -> Result<(), String> {
+        (self.agent_downloads).retain(|_, at| at.elapsed() < AGENT_DOWNLOAD_FOR);
+        if self.agent_downloads.contains_key(key) {
+            return Ok(());
+        }
+        let id = &self.accounts[key.0].id;
+        let hour = Duration::from_secs(3600);
+        self.agent_fetched.retain(|(at, _)| at.elapsed() < hour);
+        let size =
+            (self.store.message(id, &key.1, key.2).ok().flatten()).map_or(0, |m| u64::from(m.size));
+        let bytes: u64 = self.agent_fetched.iter().map(|(_, b)| b).sum();
+        if self.agent_fetched.len() >= agent::DOWNLOADS_PER_HOUR
+            || bytes + size > agent::DOWNLOAD_BYTES_PER_HOUR
+        {
+            return Err(
+                "Agents have downloaded as much mail as they may this hour: \
+                 wait, or ask the user to open it"
+                    .into(),
+            );
+        }
+        self.agent_fetched.push_back((Instant::now(), size));
+        self.agent_downloads.insert(key.clone(), Instant::now());
+        self.send(
+            key.0,
+            Request::Body {
+                folder: key.1.clone(),
+                uid: key.2,
+                uidvalidity: self.uidvalidity(key.0, &key.1),
+            },
+        );
+        Ok(())
+    }
+
+    /// Unsubscribes, for an agent, from the lists of the plan's messages
+    /// (let through: asked, or not to be asked), each the way its message
+    /// says (`unsubscribe::way`), and answers once every one is done.
+    fn agent_unsubscribe(
+        &mut self,
+        who: String,
+        plan: Plan,
+        reply: tokio::sync::oneshot::Sender<agent::Answer>,
+    ) {
+        let Action::Unsubscribe(keys) = plan.action else {
+            return;
+        };
+        let now = Instant::now();
+        self.agent_unsubscribed
+            .retain(|at| at.elapsed() < Duration::from_secs(3600));
+        self.agent_unsubscribed.extend(keys.iter().map(|_| now));
+        self.next_unsubscribe += 1;
+        let batch = self.next_unsubscribe;
+        let results = (keys.iter())
+            .map(|(i, folder, uid)| serde_json::json!({ "id": self.agent_id(*i, folder, *uid) }))
+            .collect();
+        self.agent_unsubscribes.insert(
+            batch,
+            AgentUnsubscribe {
+                who,
+                reply,
+                results,
+                downloading: Vec::new(),
+                left: keys.len(),
+                at: now,
+            },
+        );
+        for (n, key) in keys.into_iter().enumerate() {
+            let id = self.accounts[key.0].id.clone();
+            match self.store.body(&id, &key.1, key.2) {
+                Ok(Some(raw)) => self.unsubscribe_one(batch, n, &key, &raw),
+                _ if self.accounts[key.0].is_pop() || self.demo => {
+                    let why = "This message's text isn't on this computer";
+                    self.unsubscribe_done(batch, n, false, why);
+                }
+                _ => match self.agent_download(&key) {
+                    Ok(()) => {
+                        if let Some(u) = self.agent_unsubscribes.get_mut(&batch) {
+                            u.downloading.push((n, key));
+                        }
+                    }
+                    Err(e) => self.unsubscribe_done(batch, n, false, &e),
+                },
             }
         }
+    }
+
+    /// A message downloaded for agents' unsubscribes, or why not.
+    fn unsubscribe_downloaded(&mut self, key: &(usize, String, u32), raw: Result<&[u8], &str>) {
+        let mut waiting = Vec::new();
+        for (&batch, u) in &mut self.agent_unsubscribes {
+            u.downloading.retain(|(n, k)| {
+                let this = k == key;
+                if this {
+                    waiting.push((batch, *n));
+                }
+                !this
+            });
+        }
+        for (batch, n) in waiting {
+            match raw {
+                Ok(raw) => self.unsubscribe_one(batch, n, key, raw),
+                Err(e) => self.unsubscribe_done(batch, n, false, e),
+            }
+        }
+    }
+
+    /// Unsubscribes from the list of one message of an agent's `batch`
+    /// (its `n`th), with the message: one click, or mail to the list's
+    /// address, on their way; a web page is the user's.
+    fn unsubscribe_one(&mut self, batch: u64, n: usize, key: &(usize, String, u32), raw: &[u8]) {
+        let Some(u) = self.agent_unsubscribes.get_mut(&batch) else {
+            return;
+        };
+        let who = u.who.clone();
+        let result = &mut u.results[n];
+        let way = unsubscribe::way(raw);
+        let (said, site) = match &way {
+            Way::OneClick(target) => ("one-click", Some(target.host.clone())),
+            Way::Email { address, .. } => ("email", Some(unsubscribe::domain(address))),
+            Way::NeedsUser(url) => ("needs the user", Some(link_host(url))),
+            Way::Refused(_) => ("needs the user", None),
+            Way::Unsaid => ("none", None),
+        };
+        result["way"] = said.into();
+        result["site"] = site.into();
+        match way {
+            Way::OneClick(_) if self.demo => {
+                let why = "The demo connects nowhere: nothing was sent";
+                self.unsubscribe_done(batch, n, false, why);
+            }
+            Way::OneClick(target) => {
+                let tx = self.tx.clone();
+                let i = key.0;
+                let number = (self.accounts[i].worker.as_ref()).map_or(i + 1, |w| w.creds.number());
+                tokio::spawn(async move {
+                    let result = unsubscribe::one_click(&target).await;
+                    if let Err(e) = &result {
+                        logfile::failed("unsubscribing", Some(number), e);
+                    }
+                    let result = result.map_err(|e| text::one_line(&format!("{e:#}"), 300));
+                    let _ = tx.send(AppEvent::Unsubscribed { batch, n, result });
+                });
+            }
+            Way::Email { draft, .. } => self.unsubscribe_by_mail(batch, n, key.0, draft),
+            Way::NeedsUser(url) => {
+                // Asked as `U` asks, if nothing else is: the user decides.
+                let outcome = if self.nothing_open() {
+                    self.confirm(Confirm::OpenLink {
+                        url,
+                        asked_by: Some(who),
+                    });
+                    "Its list unsubscribes on a web page: the user is asked on their screen \
+                     whether to open it"
+                } else {
+                    "Its list unsubscribes on a web page, which only the user opens (U on the \
+                     message)"
+                };
+                self.unsubscribe_done(batch, n, false, outcome);
+            }
+            Way::Refused(why) => {
+                let outcome = format!("Not unsubscribed: {why}. The user can, with U");
+                self.unsubscribe_done(batch, n, false, &outcome);
+            }
+            Way::Unsaid => {
+                let why = "This message doesn't say how to unsubscribe";
+                self.unsubscribe_done(batch, n, false, why);
+            }
+        }
+    }
+
+    /// Sends the unsubscribe message a list's `mailto:` asks for, from the
+    /// account it came to, to that one address and nobody else; a copy
+    /// goes to Sent ([`App::on_sent`]).
+    fn unsubscribe_by_mail(&mut self, batch: u64, n: usize, i: usize, draft: Draft) {
+        let account = self.accounts[i].account.clone();
+        let built = compose::new_message_id(&account.email)
+            .and_then(|id| compose::build(&draft, &account, &id, now(), false));
+        // To the link's one address, and nobody else.
+        let built = match built.map_err(|e| format!("{e:#}")) {
+            Ok(built) if built.rcpts == [draft.to.clone()] => Ok(built),
+            Ok(_) => Err("it wasn't to one address".to_string()),
+            Err(e) => Err(e),
+        };
+        let built = match built {
+            Ok(built) => built,
+            Err(e) => return self.unsubscribe_done(batch, n, false, &format!("Not sent: {e}")),
+        };
+        let copy = SentCopy {
+            raw: built.raw.clone(),
+            to: built.to.clone(),
+            replying: None,
+            draft_of: None,
+            agent: Some((batch, n)),
+        };
+        let account_id = self.accounts[i].id.clone();
+        if self.demo {
+            let _ = self.tx.send(AppEvent::Sent {
+                account: account_id,
+                result: Ok(()),
+                needs_password: false,
+                sent: copy,
+            });
+            return;
+        }
+        let Some(worker) = &self.accounts[i].worker else {
+            return self.unsubscribe_done(batch, n, false, "Not sent: this account can't send");
+        };
+        let creds = worker.creds.clone();
+        let endpoint = worker.endpoints.smtp.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = worker::send(creds, endpoint, built.from, built.rcpts, built.raw).await;
+            let _ = tx.send(AppEvent::Sent {
+                account: account_id,
+                result: result.map_err(|e| text::one_line(&format!("{e:#}"), 300)),
+                needs_password: false,
+                sent: copy,
+            });
+        });
+    }
+
+    /// One message of an agent's unsubscribe is done, or isn't: once
+    /// every one is, the agent is answered and the user told.
+    fn unsubscribe_done(&mut self, batch: u64, n: usize, done: bool, outcome: &str) {
+        let Some(u) = self.agent_unsubscribes.get_mut(&batch) else {
+            return;
+        };
+        let Some(result) = u.results.get_mut(n) else {
+            return;
+        };
+        if result.get("outcome").is_some() {
+            return;
+        }
+        result["done"] = done.into();
+        result["outcome"] = outcome.into();
+        u.left -= 1;
+        if u.left > 0 {
+            return;
+        }
+        let u = self.agent_unsubscribes.remove(&batch).expect("it's there");
+        let total = u.results.len();
+        let done = u.results.iter().filter(|r| r["done"] == true).count();
+        let said = format!(
+            "unsubscribed from the lists of {done} of {}",
+            plural(total, "message")
+        );
+        self.notifier.add(notify::Note {
+            account: String::new(),
+            from: u.who.clone(),
+            subject: said.clone(),
+        });
+        self.info(format!("{}: {said}", u.who));
+        let _ = u
+            .reply
+            .send(Ok(serde_json::json!({ "results": u.results })));
     }
 
     /// The agents' reads waiting for this message, taken.
@@ -4252,6 +4593,7 @@ impl App {
             to: sent.to.clone(),
             replying,
             draft_of,
+            agent: None,
         };
         let account_id = self.accounts[i].id.clone();
         if let Some(composer) = self.composer.as_mut() {
@@ -4296,7 +4638,21 @@ impl App {
         needs_password: bool,
         sent: SentCopy,
     ) {
-        let Some(i) = self.account_index(id) else {
+        let i = self.account_index(id);
+        // An agent's unsubscribe: nothing of the composer's.
+        if let Some((batch, n)) = sent.agent {
+            match result {
+                Ok(()) => {
+                    if let Some(i) = i {
+                        self.keep_sent_copy(i, sent.raw);
+                    }
+                    self.unsubscribe_done(batch, n, true, "Sent the list's unsubscribe message");
+                }
+                Err(e) => self.unsubscribe_done(batch, n, false, &format!("Not sent: {e}")),
+            }
+            return;
+        }
+        let Some(i) = i else {
             return;
         };
         if let Err(e) = result {
@@ -4316,7 +4672,19 @@ impl App {
         let n = sent.to.len();
         self.info(format!("Sent to {}", plural(n, "recipient")));
         stored("remember", self.store.remember(&sent.to, true, now()));
-        // A copy in Sent.
+        self.keep_sent_copy(i, sent.raw);
+        if let Some(key) = sent.replying.and_then(|k| self.resolve(&k)) {
+            self.set_flag(&[key], FlagKind::Answered, true);
+        }
+        if sent.draft_of.is_some() {
+            self.replace_draft(sent.draft_of);
+            self.info(format!("Sent to {}", plural(n, "recipient")));
+        }
+    }
+
+    /// A copy of what was sent, in Sent: kept here for POP3 (and the
+    /// demo), appended on the server for IMAP unless the account says not.
+    fn keep_sent_copy(&mut self, i: usize, raw: Vec<u8>) {
         let pop = self.accounts[i].is_pop() || self.demo;
         if pop {
             let folder = self.accounts[i]
@@ -4328,8 +4696,8 @@ impl App {
                 ..Flags::default()
             };
             let id = self.accounts[i].id.clone();
-            if let Ok(uid) = self.store.add_local(&id, &folder, &sent.raw, seen, None) {
-                self.make_previews(i, vec![(folder.clone(), uid, Arc::new(sent.raw))]);
+            if let Ok(uid) = self.store.add_local(&id, &folder, &raw, seen, None) {
+                self.make_previews(i, vec![(folder.clone(), uid, Arc::new(raw))]);
             }
             self.refresh_counts(i, &folder);
             if self.shows(i, &folder) {
@@ -4346,7 +4714,7 @@ impl App {
                 i,
                 Request::Append {
                     folder,
-                    raw: sent.raw,
+                    raw,
                     flags: Flags {
                         seen: true,
                         ..Flags::default()
@@ -4356,13 +4724,6 @@ impl App {
                     retry: true,
                 },
             );
-        }
-        if let Some(key) = sent.replying.and_then(|k| self.resolve(&k)) {
-            self.set_flag(&[key], FlagKind::Answered, true);
-        }
-        if sent.draft_of.is_some() {
-            self.replace_draft(sent.draft_of);
-            self.info(format!("Sent to {}", plural(n, "recipient")));
         }
     }
 
@@ -4512,7 +4873,10 @@ impl App {
             self.pending = None;
             self.composer = Some(Composer::new(account, Kind::New, draft));
         } else {
-            self.confirm(Confirm::OpenLink { url: link });
+            self.confirm(Confirm::OpenLink {
+                url: link,
+                asked_by: None,
+            });
         }
     }
 
@@ -5398,8 +5762,14 @@ impl App {
     /// `y` answers yes; for an unsaved message, `n` discards it; any other
     /// key cancels.
     fn on_confirm_key(&mut self, key: KeyEvent) {
+        // A question that comes up on its own (an agent's) waits longer.
         let grace = match self.confirm {
-            Some(Confirm::Agent { .. }) => AGENT_GRACE,
+            Some(
+                Confirm::Agent { .. }
+                | Confirm::OpenLink {
+                    asked_by: Some(_), ..
+                },
+            ) => AGENT_GRACE,
             _ => CONFIRM_GRACE,
         };
         let early = self.confirm_at.elapsed() < grace;
@@ -5454,7 +5824,7 @@ impl App {
             Confirm::OpenAttachment { index, name } if yes => {
                 self.extract(index, &name, true, true)
             }
-            Confirm::OpenLink { url } if yes => self.open_link(&url),
+            Confirm::OpenLink { url, .. } if yes => self.open_link(&url),
             Confirm::RemoveAccount(i) if yes => self.remove_account(i),
             Confirm::Quit { .. } if yes => self.quit = true,
             confirm if early => self.confirm = Some(confirm),
@@ -5490,6 +5860,12 @@ impl App {
         self.reader = None;
         for read in std::mem::take(&mut self.agent_reads) {
             let _ = read.reply.send(Err("The account was removed".into()));
+        }
+        let downloading: Vec<(u64, usize)> = (self.agent_unsubscribes.iter_mut())
+            .flat_map(|(&batch, u)| u.downloading.drain(..).map(move |(n, _)| (batch, n)))
+            .collect();
+        for (batch, n) in downloading {
+            self.unsubscribe_done(batch, n, false, "The account was removed");
         }
         self.agent_downloads.clear();
         self.marked.clear();
@@ -7652,6 +8028,241 @@ pub mod tests {
         assert!(refused.try_recv().unwrap().is_err());
         assert_eq!(downloads(&app), 1);
         drop(waiting);
+    }
+
+    /// A list's message in the first account's inbox, its text kept here
+    /// or not, and its id for agents.
+    fn list_mail(app: &mut App, uid: u32, headers: &str, cached: bool) -> String {
+        let id = app.accounts[0].id.clone();
+        let raw = format!(
+            "From: news@shop.example\r\nSubject: Sale {uid}\r\nMessage-ID: <{uid}@shop.example>\r\n\
+             {headers}\r\nBuy now\r\n"
+        );
+        let header = crate::store::Header {
+            uid,
+            summary: mail::summarize(raw.as_bytes()),
+            flags: Flags::default(),
+            size: raw.len() as u32,
+        };
+        app.store.add_headers(&id, "INBOX", &[header]).unwrap();
+        if cached {
+            app.store
+                .save_body(&id, "INBOX", uid, raw.as_bytes())
+                .unwrap();
+        }
+        app.agent_id(0, "INBOX", uid)
+    }
+
+    const BY_MAIL: &str = "List-Unsubscribe: <mailto:leave@lists.example?subject=Stop%20it>, \
+        <https://lists.example/u?id=1>\r\n";
+
+    #[tokio::test]
+    async fn an_agents_unsubscribe_waits_for_y_then_mails_the_lists_one_address_only() {
+        let mut app = app();
+        with_mail(&mut app);
+        let id = list_mail(&mut app, 78001, BY_MAIL, true);
+        let mut answer = agent_call(
+            &mut app,
+            Call::Unsubscribe(agent::IdsArgs { ids: vec![id] }),
+        );
+        assert!(answer.try_recv().is_err(), "it waits");
+        let shown = crate::ui::tests::screen(&mut app, 160, 30);
+        for said in [
+            "wants to unsubscribe",
+            "you from the mailing lists of 1 message:",
+            "news@shop.example · Sale 78001",
+            "This can't be undone",
+        ] {
+            assert!(shown.contains(said), "{said}: {shown}");
+        }
+        app.confirm_at = Instant::now() - AGENT_GRACE;
+        app.on_key(key(KeyCode::Char('y')));
+        // The message as it's sent: to the list's address and no one else.
+        let event = app.test_rx.as_mut().unwrap().try_recv().unwrap();
+        let AppEvent::Sent { ref sent, .. } = event else {
+            panic!("not a send");
+        };
+        let parsed = mail::parse(&sent.raw).unwrap();
+        let to: Vec<&str> = parsed.to.iter().map(|a| a.addr.as_str()).collect();
+        assert_eq!(to, ["leave@lists.example"]);
+        assert!(parsed.cc.is_empty());
+        assert_eq!(parsed.summary.subject, "Stop it");
+        assert_eq!(parsed.text.as_deref().map(str::trim), Some("unsubscribe"));
+        app.on_event(event);
+        let done = answer.try_recv().unwrap().unwrap();
+        let result = &done["results"][0];
+        assert_eq!(result["way"], "email");
+        assert_eq!(result["site"], "lists.example");
+        assert_eq!(result["done"], true);
+        assert!(!done.to_string().contains("leave@"), "{done}");
+        // A copy in Sent; nothing kept as a change to undo.
+        let sent_folder = app.accounts[0].folder_for(Role::Sent).unwrap().name.clone();
+        let account = app.accounts[0].id.clone();
+        let kept = app.store.messages(&account, &sent_folder, 100).unwrap();
+        assert!(kept.iter().any(|m| m.summary.subject == "Stop it"));
+        assert!(
+            app.store
+                .changes(10)
+                .unwrap()
+                .iter()
+                .all(|c| c.who.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agents_unsubscribe_answers_each_message_its_way() {
+        let mut app = app();
+        with_mail(&mut app);
+        app.settings.confirm_agents = false;
+        let one_click = "List-Unsubscribe: <https://lists.example/u?id=1>\r\n\
+            List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n";
+        let page = "List-Unsubscribe: <https://shop.example/prefs?u=9>\r\n";
+        let ids = vec![
+            list_mail(&mut app, 78011, one_click, true),
+            list_mail(&mut app, 78012, page, true),
+            list_mail(&mut app, 78013, "", true),
+            list_mail(&mut app, 78014, page, false),
+        ];
+        let done = agent_now(&mut app, Call::Unsubscribe(agent::IdsArgs { ids })).unwrap();
+        let results = done["results"].as_array().unwrap();
+        let ways: Vec<&str> = results
+            .iter()
+            .map(|r| r["way"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(ways, ["one-click", "needs the user", "none", ""]);
+        assert_eq!(results[0]["site"], "lists.example");
+        // The demo connects nowhere.
+        assert_eq!(results[0]["done"], false);
+        assert_eq!(results[1]["site"], "shop.example");
+        assert!(results.iter().all(|r| r["outcome"].is_string()), "{done}");
+        assert!(!done.to_string().contains("https://"), "{done}");
+        // The page is the user's, asked as `U` asks, saying who asked.
+        let Some(Confirm::OpenLink { url, asked_by }) = app.confirm.clone() else {
+            panic!("not asked: {:?}", app.confirm);
+        };
+        assert_eq!(url, "https://shop.example/prefs?u=9");
+        assert_eq!(asked_by.as_deref(), Some("Claude Code"));
+        let shown = crate::ui::tests::screen(&mut app, 160, 30);
+        assert!(shown.contains("asked to unsubscribe"), "{shown}");
+        // Another, with that question up: only said.
+        let id = list_mail(&mut app, 78015, page, true);
+        let done = agent_now(
+            &mut app,
+            Call::Unsubscribe(agent::IdsArgs { ids: vec![id] }),
+        )
+        .unwrap();
+        let outcome = done["results"][0]["outcome"].as_str().unwrap();
+        assert!(outcome.contains("only the user opens"), "{outcome}");
+    }
+
+    #[tokio::test]
+    async fn an_agents_unsubscribe_downloads_its_message_once_then_goes_on() {
+        let mut app = app();
+        with_mail(&mut app);
+        app.demo = false;
+        app.settings.confirm_agents = false;
+        let id = list_mail(&mut app, 78021, BY_MAIL, false);
+        let mut answer = agent_call(
+            &mut app,
+            Call::Unsubscribe(agent::IdsArgs { ids: vec![id] }),
+        );
+        assert!(answer.try_recv().is_err(), "it waits for the message");
+        let downloads = (app.test_sent.borrow().iter())
+            .filter(|(_, r)| matches!(r, Request::Body { uid: 78021, .. }))
+            .count();
+        assert_eq!(downloads, 1);
+        let raw = app
+            .store
+            .message(&app.accounts[0].id, "INBOX", 78021)
+            .unwrap();
+        assert!(raw.is_some());
+        let body = format!("From: news@shop.example\r\nSubject: Sale\r\n{BY_MAIL}\r\nBuy now\r\n");
+        app.on_worker(
+            0,
+            worker::Event::Body {
+                folder: "INBOX".into(),
+                uid: 78021,
+                result: Ok(Some(body.into_bytes())),
+            },
+        );
+        // No worker here to send it with: said, and nothing else tried.
+        let done = answer.try_recv().unwrap().unwrap();
+        let result = &done["results"][0];
+        assert_eq!(result["way"], "email");
+        assert_eq!(result["done"], false);
+        assert!(
+            result["outcome"].as_str().unwrap().contains("can't send"),
+            "{done}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agents_unsubscribe_within_their_limits() {
+        let mut app = app();
+        with_mail(&mut app);
+        app.settings.confirm_agents = false;
+        let id = list_mail(&mut app, 78031, BY_MAIL, true);
+        let refused = |answer: agent::Answer, said: &str| {
+            let error = answer.unwrap_err();
+            assert!(error.contains(said), "{said}: {error}");
+        };
+        refused(
+            agent_now(&mut app, Call::Unsubscribe(agent::IdsArgs { ids: vec![] })),
+            "No message ids",
+        );
+        refused(
+            agent_now(
+                &mut app,
+                Call::Unsubscribe(agent::IdsArgs {
+                    ids: vec![id.clone(); agent::MAX_IDS + 1],
+                }),
+            ),
+            "At most",
+        );
+        refused(
+            agent_now(
+                &mut app,
+                Call::Unsubscribe(agent::IdsArgs {
+                    ids: vec!["bm9wZQ".into()],
+                }),
+            ),
+            "isn't a message tuimail has",
+        );
+        // An hour's worth is the most.
+        (app.agent_unsubscribed).extend((0..agent::UNSUBSCRIBES_PER_HOUR).map(|_| Instant::now()));
+        refused(
+            agent_now(
+                &mut app,
+                Call::Unsubscribe(agent::IdsArgs {
+                    ids: vec![id.clone()],
+                }),
+            ),
+            "in the last hour",
+        );
+        // Older than an hour: counts no more. Not counted as changes.
+        app.agent_unsubscribed.clear();
+        app.agent_spent
+            .push_back((Instant::now(), agent::CHANGES_PER_HOUR, 0));
+        let mut done = agent_call(
+            &mut app,
+            Call::Unsubscribe(agent::IdsArgs { ids: vec![id] }),
+        );
+        app.drain_for_tests();
+        let done = done.try_recv().unwrap();
+        assert!(done.is_ok(), "{done:?}");
+        assert_eq!(app.agent_unsubscribed.len(), 1);
+        // Agents off: refused like any call.
+        let (reply, mut answer) = tokio::sync::oneshot::channel();
+        app.on_event(AppEvent::Agent {
+            request: agent::Request {
+                client: "Claude Code".into(),
+                call: Call::Unsubscribe(agent::IdsArgs {
+                    ids: vec!["x".into()],
+                }),
+            },
+            reply,
+        });
+        refused(answer.try_recv().unwrap(), "turned AI agents off");
     }
 
     #[tokio::test]
