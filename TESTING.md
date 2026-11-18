@@ -64,8 +64,10 @@ shows the case being described. The turn his answer settles it, end the server.
 ## Update the existing window after a release
 
 Each push to main releases tuimail and starts home-sync, which installs it at
-`C:\Program Files\at-home\tuimail\current\tuimail.exe`. The tuimail already running
-keeps the old version until its pane restarts, and that is mine to do, never his.
+`C:\Program Files\at-home\tuimail\current\tuimail.exe`. Every tuimail already running
+keeps the old version until it restarts: his window, and the `tuimail mcp` each Claude
+session started. Restarting all of them is mine to do, never his, and none is left on the
+old release as a limit to report.
 
 1. Confirm the new release is installed: `tuimail.exe --version` from the managed
    path, and its Authenticode signature is `Valid` from `CN=at-terminal`.
@@ -76,4 +78,11 @@ keeps the old version until its pane restarts, and that is mine to do, never his
 4. `tmux respawn-pane -k -t <pane id> tuimail.exe ''` (the empty argument keeps tmux
    from running it through a shell, as `windows.conf` starts it).
 5. Read the pane back: it's alive, it runs the new version (`/` then `info`, then
-   any key to close), and his accounts are checking. Only then say it's updated.
+   any key to close), and his accounts are checking. Send keys one per
+   `tmux send-keys` call, from PowerShell (Git Bash turns a lone `/` into a path), and
+   never `C-c`: through tmux it ends tuimail rather than closing the palette.
+6. Stop every `tuimail mcp` process started before the install (its command line ends
+   in ` mcp`; compare its start time with the installed file's), this session's and
+   every other session's. Claude Code starts a new one at the session's next tuimail
+   call, which then answers with the new release's tools.
+7. Only then say it's updated.
