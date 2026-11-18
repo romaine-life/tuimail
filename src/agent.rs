@@ -118,6 +118,10 @@ pub struct SearchArgs {
     /// At most this many, newest first (up to 50; default 20).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    /// For older ones: the `next` of the answer before, which carries on
+    /// from where it ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -244,6 +248,32 @@ pub fn unhandle(id: &str) -> Option<(String, String, u32, u32)> {
         return None;
     }
     Some((account.into(), folder.into(), uidvalidity, uid))
+}
+
+/// Where a search's answer ended, for the next to carry on from (read back
+/// with [`unplace`]): its last message's date, account id, folder and UID.
+pub fn place(date: i64, account: &str, folder: &str, uid: u32) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(format!("{date}\n{account}\n{folder}\n{uid}"))
+}
+
+/// What a [`place`] holds: date, account id, folder, UID.
+pub fn unplace(next: &str) -> Option<(i64, String, String, u32)> {
+    if next.len() > 2000 {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(next.trim())
+        .ok()?;
+    let text = String::from_utf8(bytes).ok()?;
+    let mut parts = text.split('\n');
+    let date = parts.next()?.parse().ok()?;
+    let (account, folder) = (parts.next()?, parts.next()?);
+    let uid = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || account.is_empty() || folder.is_empty() {
+        return None;
+    }
+    Some((date, account.into(), folder.into(), uid))
 }
 
 /// Text from mail for an agent (a body, a subject, a name, a preview):

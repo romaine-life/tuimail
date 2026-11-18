@@ -284,6 +284,17 @@ const MESSAGE_COLUMNS: &str = "folder, uid, message_id, in_reply_to, refs, date,
      from_addr, to_list, cc_list, subject, attachments, seen, flagged, answered, draft, size, \
      preview, tags";
 
+/// What [`Store::find`] keeps of what it finds, besides its words.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Narrow {
+    /// Only messages dated at or before this (Unix seconds).
+    pub until: Option<i64>,
+    /// Only unread messages.
+    pub unread_only: bool,
+    /// Only starred messages.
+    pub starred_only: bool,
+}
+
 /// Messages bigger than this aren't kept: they're fetched again to read.
 pub const MAX_KEPT_BODY: usize = 25 << 20;
 
@@ -569,9 +580,23 @@ impl Store {
         query: &str,
         limit: usize,
     ) -> Result<Vec<Message>> {
+        self.find(account, folder, Some(query), Narrow::default(), limit)
+    }
+
+    /// The account's messages, newest first, in `folder` only if given:
+    /// with a `query`, those [`Store::search`] finds (none if it has no
+    /// words), else all of them; and only those `narrow` lets through.
+    pub fn find(
+        &self,
+        account: &str,
+        folder: Option<&str>,
+        query: Option<&str>,
+        narrow: Narrow,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
         let mut tagged = Vec::new();
         let mut words = Vec::new();
-        for w in query.split_whitespace().take(8) {
+        for w in query.unwrap_or_default().split_whitespace().take(8) {
             if let Some(tag) = tags::searched(w) {
                 tagged.push(tag);
                 continue;
@@ -582,7 +607,7 @@ impl Store {
                 .replace('_', "\\_");
             words.push(format!("%{escaped}%"));
         }
-        if words.is_empty() && tagged.is_empty() {
+        if query.is_some() && words.is_empty() && tagged.is_empty() {
             return Ok(Vec::new());
         }
         let mut sql = format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE account = ?1");
@@ -590,6 +615,16 @@ impl Store {
         if let Some(folder) = folder {
             values.push(folder.to_string().into());
             sql.push_str(&format!(" AND folder = ?{}", values.len()));
+        }
+        if let Some(until) = narrow.until {
+            values.push(until.into());
+            sql.push_str(&format!(" AND date <= ?{}", values.len()));
+        }
+        if narrow.unread_only {
+            sql.push_str(" AND seen = 0");
+        }
+        if narrow.starred_only {
+            sql.push_str(" AND flagged != 0");
         }
         for tag in tagged {
             values.push(tag.into());

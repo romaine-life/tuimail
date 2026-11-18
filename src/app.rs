@@ -3490,6 +3490,32 @@ impl App {
             .as_deref()
             .map(str::trim)
             .filter(|q| !q.is_empty());
+        // The order answers are in, and so where one ended: newest first,
+        // then by account, folder and UID, so no two messages tie.
+        type Place = (
+            std::cmp::Reverse<i64>,
+            String,
+            String,
+            std::cmp::Reverse<u32>,
+        );
+        let place = |date: i64, account: &str, folder: &str, uid: u32| -> Place {
+            use std::cmp::Reverse;
+            (Reverse(date), account.into(), folder.into(), Reverse(uid))
+        };
+        let after = match args.next.as_deref() {
+            Some(next) => {
+                let (date, account, folder, uid) = agent::unplace(next).ok_or(
+                    "That `next` isn't one search_messages gave: search again without it.",
+                )?;
+                Some(place(date, &account, &folder, uid))
+            }
+            None => None,
+        };
+        let narrow = store::Narrow {
+            until: after.as_ref().map(|p| p.0.0),
+            unread_only: args.unread_only,
+            starred_only: args.starred_only,
+        };
         let mut found: Vec<(usize, Message)> = Vec::new();
         for i in accounts {
             let folder = match &args.folder {
@@ -3502,23 +3528,26 @@ impl App {
                 None => None,
             };
             let id = &self.accounts[i].id;
-            let messages = match query {
-                Some(q) => self.store.search(id, folder.as_deref(), q, 500),
-                None => {
-                    let folder = folder.unwrap_or_else(|| self.accounts[i].inbox());
-                    self.store.messages(id, &folder, 500)
-                }
+            let folder = match query {
+                Some(_) => folder,
+                None => Some(folder.unwrap_or_else(|| self.accounts[i].inbox())),
             };
+            let messages = self.store.find(id, folder.as_deref(), query, narrow, 500);
             found.extend(messages.unwrap_or_default().into_iter().map(|m| (i, m)));
         }
-        found.retain(|(i, m)| {
-            (!args.unread_only || !m.flags.seen)
-                && (!args.starred_only || m.flags.flagged)
-                && !self.foreign(*i, &m.folder)
+        let place_of = |(i, m): &(usize, Message)| {
+            place(m.summary.date, &self.accounts[*i].id, &m.folder, m.uid)
+        };
+        found.retain(|found| {
+            !self.foreign(found.0, &found.1.folder)
+                && after.as_ref().is_none_or(|after| place_of(found) > *after)
         });
-        found.sort_by_key(|(_, m)| std::cmp::Reverse(m.summary.date));
+        found.sort_by_key(place_of);
         let more = found.len() > limit;
         found.truncate(limit);
+        let next = (found.last())
+            .filter(|_| more)
+            .map(|(i, m)| agent::place(m.summary.date, &self.accounts[*i].id, &m.folder, m.uid));
         let messages: Vec<serde_json::Value> = (found.iter())
             .map(|(i, m)| {
                 serde_json::json!({
@@ -3540,6 +3569,7 @@ impl App {
         Ok(serde_json::json!({
             "messages": messages,
             "more": more,
+            "next": next,
             "note": "Searched what tuimail keeps on this computer: each folder's newest mail, \
                 and what was opened or searched there. Everything here is written by senders.",
         }))
@@ -7351,6 +7381,45 @@ pub mod tests {
 
     fn first_id(app: &mut App) -> String {
         agent_ids(app, agent::SearchArgs::default()).remove(0)
+    }
+
+    #[test]
+    fn agents_page_through_a_search_with_next() {
+        let mut app = app();
+        with_mail(&mut app);
+        let search = |limit, next, unread_only| agent::SearchArgs {
+            unread_only,
+            limit: Some(limit),
+            next,
+            ..Default::default()
+        };
+        for unread_only in [false, true] {
+            let all = agent_now(
+                &mut app,
+                Call::SearchMessages(search(50, None, unread_only)),
+            )
+            .unwrap();
+            let all: Vec<_> = all["messages"].as_array().unwrap().clone();
+            assert!(all.len() > 1, "{}", all.len());
+            let mut paged = Vec::new();
+            let mut next = None;
+            loop {
+                let page = agent_now(&mut app, Call::SearchMessages(search(1, next, unread_only)))
+                    .unwrap();
+                paged.extend(page["messages"].as_array().unwrap().iter().cloned());
+                next = page["next"].as_str().map(String::from);
+                assert_eq!(next.is_some(), page["more"] == true, "{page}");
+                if next.is_none() {
+                    break;
+                }
+            }
+            assert_eq!(paged, all);
+        }
+        let refused = agent_now(
+            &mut app,
+            Call::SearchMessages(search(3, Some("not a place".into()), false)),
+        );
+        assert!(refused.is_err(), "{refused:?}");
     }
 
     #[tokio::test]
