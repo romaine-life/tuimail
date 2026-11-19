@@ -18,19 +18,22 @@ path = "src/main.rs"
 # Release asset URLs for installers that supply Forgejo authentication.
 # README.md has authenticated download commands. QuickInstall binaries,
 # which are not built here, are never used.
+# Each is the bare binary, named for its platform.
 [package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/tuimail-{ target }.tar.gz"
-pkg-fmt = "tgz"
-bin-dir = "tuimail{ binary-ext }"
+pkg-fmt = "bin"
 disabled-strategies = ["quick-install"]
 
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/tuimail-linux-amd64"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/tuimail-linux-arm64"
+
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
-pkg-url = "{ repo }/releases/download/v{ version }/tuimail-{ target }.zip"
-pkg-fmt = "zip"
+pkg-url = "{ repo }/releases/download/v{ version }/tuimail-windows-amd64.exe"
 
 [package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
-pkg-url = "{ repo }/releases/download/v{ version }/tuimail-{ target }.zip"
-pkg-fmt = "zip"
+pkg-url = "{ repo }/releases/download/v{ version }/tuimail-windows-arm64.exe"
 
 [dependencies]
 anyhow = "1.0.104"

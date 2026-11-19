@@ -46,40 +46,54 @@ This is Nelson's fork of [erictran308/tuimail](https://github.com/erictran308/tu
 
 **1. Install tuimail.** Forgejo requires authentication for release downloads, including this public repository. These commands use the Forgejo credential already stored for Git and download the compiled release.
 
-On Linux, choose your archive from the table below and run this in Bash. It puts `tuimail` in `~/.local/bin`; the authentication header reaches curl through stdin:
+On Linux, choose your file from the table below and run this in Bash. It checks the download against the release's `SHA256SUMS` and puts it in `~/.local/bin` as `tuimail`; the authentication header reaches curl through stdin:
 
 ```bash
 (
   set -euo pipefail
   set +x
-  asset=tuimail-x86_64-unknown-linux-gnu.tar.gz
+  asset=tuimail-linux-amd64
   forgejo_token=$(printf 'protocol=https\nhost=forgejo.romaine.life\n\n' |
     git credential fill | sed -n 's/^password=//p')
   [ -n "$forgejo_token" ] || { printf 'No stored Forgejo credential found.\n' >&2; exit 1; }
+  download=$(mktemp -d)
+  trap 'rm -rf "$download"' EXIT
+  for file in "$asset" SHA256SUMS; do
+    printf 'Authorization: token %s\n' "$forgejo_token" |
+      curl --fail --silent --show-error --location --header @- --output "$download/$file" \
+        "https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/$file"
+  done
+  (cd "$download" && grep -E "^[0-9a-f]{64}  $asset\$" SHA256SUMS | sha256sum --check --quiet -)
   mkdir -p "$HOME/.local/bin"
-  printf 'Authorization: token %s\n' "$forgejo_token" |
-    curl --fail --silent --show-error --location --header @- \
-      "https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/$asset" |
-    tar xz -C "$HOME/.local/bin" tuimail
+  chmod 755 "$download/$asset"
+  mv "$download/$asset" "$HOME/.local/bin/tuimail"
 )
 ```
 
-On Windows, choose the ZIP name for your architecture and run this in PowerShell. It installs into `%LOCALAPPDATA%\Programs\tuimail`; the token stays in an in-process header:
+On Windows, choose the file for your architecture and run this in PowerShell. It checks the download against the release's `SHA256SUMS` and installs it as `%LOCALAPPDATA%\Programs\tuimail\tuimail.exe`; the token stays in an in-process header:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$asset = 'tuimail-x86_64-pc-windows-msvc.zip'
+$asset = 'tuimail-windows-amd64.exe'
 $passwordLine = @("protocol=https`nhost=forgejo.romaine.life`n`n" |
   git credential fill | Where-Object { $_ -like 'password=*' })[0]
 if (-not $passwordLine) { throw 'No stored Forgejo credential found' }
 $headers = @{ Authorization = 'token ' + $passwordLine.Substring(9) }
-$archive = Join-Path ([IO.Path]::GetTempPath()) ("tuimail-$([guid]::NewGuid().ToString('N')).zip")
+$release = 'https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest'
+$download = Join-Path ([IO.Path]::GetTempPath()) ("tuimail-$([guid]::NewGuid().ToString('N'))")
 $installDir = Join-Path $env:LOCALAPPDATA 'Programs\tuimail'
 try {
-  Invoke-WebRequest -Headers $headers -OutFile $archive -Uri "https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/$asset"
-  Expand-Archive -LiteralPath $archive -DestinationPath $installDir -Force
+  New-Item -ItemType Directory -Path $download | Out-Null
+  Invoke-WebRequest -Headers $headers -OutFile (Join-Path $download $asset) -Uri "$release/$asset"
+  Invoke-WebRequest -Headers $headers -OutFile (Join-Path $download 'SHA256SUMS') -Uri "$release/SHA256SUMS"
+  $line = @(Get-Content -LiteralPath (Join-Path $download 'SHA256SUMS') |
+    Where-Object { $_ -cmatch "^[0-9a-f]{64}  $([regex]::Escape($asset))$" })
+  if ($line.Count -ne 1) { throw "SHA256SUMS doesn't list $asset" }
+  if ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $download $asset)).Hash -ne $line[0].Substring(0, 64)) { throw "$asset doesn't match SHA256SUMS" }
+  New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+  Move-Item -Force -LiteralPath (Join-Path $download $asset) -Destination (Join-Path $installDir 'tuimail.exe')
 } finally {
-  if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive }
+  if (Test-Path -LiteralPath $download) { Remove-Item -Recurse -LiteralPath $download }
   $headers.Clear()
   $passwordLine = $null
 }
@@ -90,15 +104,15 @@ Set `asset` to the file for your computer. You can also sign into Forgejo in you
 
 | Computer | File |
 | --- | --- |
-| Linux, x86_64 | [`tuimail-x86_64-unknown-linux-gnu.tar.gz`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux, ARM64 | [`tuimail-aarch64-unknown-linux-gnu.tar.gz`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-aarch64-unknown-linux-gnu.tar.gz) |
-| Windows, x86_64 | [`tuimail-x86_64-pc-windows-msvc.zip`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-x86_64-pc-windows-msvc.zip) |
-| Windows, ARM64 | [`tuimail-aarch64-pc-windows-msvc.zip`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-aarch64-pc-windows-msvc.zip) |
+| Linux, x86_64 | [`tuimail-linux-amd64`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-linux-amd64) |
+| Linux, ARM64 | [`tuimail-linux-arm64`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-linux-arm64) |
+| Windows, x86_64 | [`tuimail-windows-amd64.exe`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-windows-amd64.exe) |
+| Windows, ARM64 | [`tuimail-windows-arm64.exe`](https://forgejo.romaine.life/romaine-life/tuimail/releases/download/latest/tuimail-windows-arm64.exe) |
 
-- **Windows:** add `%LOCALAPPDATA%\Programs\tuimail` to your `PATH`, or run `tuimail.exe` there from Windows Terminal. A browser download can instead be unzipped into a folder of your choice.
-- **Linux:** needs glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36 or later.
+- **Windows:** add `%LOCALAPPDATA%\Programs\tuimail` to your `PATH`, or run `tuimail.exe` there from Windows Terminal. A browser download can instead be saved as `tuimail.exe` in a folder of your choice.
+- **Linux:** needs glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36 or later. A browser download is renamed `tuimail` and made executable (`chmod +x tuimail`).
 
-If `tuimail` isn't found afterwards, add `~/.local/bin` to your `PATH`. The Forgejo release includes `SHA256SUMS` for all four archives. There's no Mac build. Compare a downloaded archive's SHA-256 checksum with its matching line in that file. Windows executables carry the at-terminal Authenticode signature; the release archives do not claim GitHub provenance attestations.
+If `tuimail` isn't found afterwards, add `~/.local/bin` to your `PATH`. The Forgejo release includes `SHA256SUMS` for all four files. There's no Mac build. Compare a browser download's SHA-256 checksum with its matching line in that file. Windows executables carry the at-terminal Authenticode signature; the release files do not claim GitHub provenance attestations.
 
 **2. Run it.**
 
