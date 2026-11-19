@@ -60,6 +60,8 @@ const CONFIRM_GRACE: Duration = Duration::from_millis(300);
 /// agent gone): a `y` meant for the one being read must not answer the
 /// next, so its grace is longer.
 const AGENT_GRACE: Duration = Duration::from_millis(1500);
+/// How long after listening for agents failed it's tried again.
+const AGENT_LISTEN_RETRY: Duration = Duration::from_secs(5);
 const HELP_PAGE: isize = 5;
 /// Every this many checks, each folder's counts are asked for too.
 const FOLDERS_EVERY: u32 = 4;
@@ -599,6 +601,9 @@ pub struct App {
     change: Option<Change>,
     /// Where agents reach this tuimail (`None`: they don't).
     pub agent_socket: Option<PathBuf>,
+    /// When listening for agents failed (the pipe still held by a tuimail
+    /// that's quitting, say): tried again `AGENT_LISTEN_RETRY` later.
+    agents_failed_at: Option<Instant>,
     /// Listening for AI agents (the setting on).
     agents: Option<agent::Listener>,
     /// A sign-in waits for the browser.
@@ -783,6 +788,7 @@ impl App {
             tagging: Vec::new(),
             change: None,
             agent_socket: None,
+            agents_failed_at: None,
             agents: None,
             signing_in: false,
             agent_asks: VecDeque::new(),
@@ -1015,6 +1021,10 @@ impl App {
         // Agents turned off in settings.toml (`agents_allowed`): stopped
         // here, once what was refused has been answered.
         if !self.settings.agents && self.agents.is_some() {
+            self.listen_for_agents();
+        }
+        // Listening failed: again, now and then, until it works.
+        if (self.agents_failed_at).is_some_and(|at| at.elapsed() >= AGENT_LISTEN_RETRY) {
             self.listen_for_agents();
         }
         self.ask_agents();
@@ -2909,10 +2919,17 @@ impl App {
                 return;
             };
             match agent::listen(&socket, self.tx.clone()) {
-                Ok(listener) => self.agents = Some(listener),
+                Ok(listener) => {
+                    self.agents = Some(listener);
+                    self.agents_failed_at = None;
+                }
                 Err(e) => {
-                    logfile::failed("listening for agents", None, &e);
-                    self.error(format!("AI agents: {e:#}"));
+                    // Said once; tried again from the tick until it works.
+                    if self.agents_failed_at.is_none() {
+                        logfile::failed("listening for agents", None, &e);
+                        self.error(format!("AI agents: {e:#}"));
+                    }
+                    self.agents_failed_at = Some(Instant::now());
                 }
             }
         } else if !wanted && self.agents.is_some() {
@@ -8569,6 +8586,39 @@ pub mod tests {
             agent::ask(&socket, &request).await.unwrap_err().to_string(),
             agent::NOT_LISTENING
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tuimail started while another still holds the pipe (one quitting
+    /// as it's restarted) listens once that one lets go.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn listening_for_agents_is_tried_again_until_it_works() {
+        let dir = crate::tools::private_temp_dir().unwrap();
+        let socket = agent::socket(&dir, false);
+        let mut old = app();
+        old.agent_socket = Some(socket.clone());
+        old.settings.agents = true;
+        old.listen_for_agents();
+        assert!(old.agents.is_some());
+        let mut new = app();
+        new.agent_socket = Some(socket.clone());
+        new.settings.agents = true;
+        new.listen_for_agents();
+        assert!(new.agents.is_none() && new.agents_failed_at.is_some());
+        old.settings.agents = false;
+        old.listen_for_agents();
+        // The old pipe closes as its task ends: the tick tries until then.
+        for _ in 0..100 {
+            new.agents_failed_at = Instant::now().checked_sub(AGENT_LISTEN_RETRY);
+            new.on_tick();
+            if new.agents.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(new.agents.is_some(), "listening once the pipe is free");
+        assert!(new.agents_failed_at.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
