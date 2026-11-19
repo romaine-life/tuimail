@@ -35,6 +35,13 @@ pkg-url = "{ repo }/releases/download/v{ version }/tuimail-windows-amd64.exe"
 [package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
 pkg-url = "{ repo }/releases/download/v{ version }/tuimail-windows-arm64.exe"
 
+# The Linux releases run on glibc 2.35 (Ubuntu 22.04) and newer.
+[package.metadata.pipeline-templates.targets.x86_64-unknown-linux-gnu]
+glibc = "2.35"
+
+[package.metadata.pipeline-templates.targets.aarch64-unknown-linux-gnu]
+glibc = "2.35"
+
 [dependencies]
 anyhow = "1.0.104"
 arboard = { version = "3.6.1", default-features = false }
