@@ -2,7 +2,7 @@
 //! SMTP over TLS with a certificate of its own (trusted here the way an
 //! account's `certificate` is). They run where `GREENMAIL_CERT` names that
 //! certificate at build time, as in the CI suite's service job, which starts
-//! GreenMail on the job's network with alice and bob (`ci/services.json`) and
+//! GreenMail on the job's network with its two accounts, alice and bob, and
 //! sets `IMAP_HOST`, `IMAPS_PORT` and the rest. Locally:
 //!
 //! ```sh
