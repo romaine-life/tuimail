@@ -64,15 +64,20 @@ shows the case being described. The turn his answer settles it, end the server.
 ## Update the existing window after a release
 
 Each push to main releases tuimail and starts home-sync, which installs it at
-`C:\Program Files\at-home\tuimail\current\tuimail.exe`. Every tuimail already running
-keeps the old version until it restarts: his window, and the `tuimail mcp` each Claude
-session started. Restarting all of them is mine to do, never his, and none is left on the
+`C:\Program Files\at-home\tuimail\current\tuimail.exe` on every home PC, and Argo CD
+restarts the session on the home cluster when the release changes its image. Every tuimail
+already running keeps the old version until it restarts: the `mail` window on each home PC
+(they all go through the session: nelsonpc, upstairspc, treadmill, and nelsonlaptop when it
+runs one), and the `tuimail mcp` each Claude session started. Restarting all of them is mine to do, never his, and none is left on the
 old release as a limit to report.
 
 1. Confirm the new release is installed: `tuimail.exe --version` from the managed
    path, and its Authenticode signature is `Valid` from `CN=at-terminal`.
-2. Find his tuimail: the `mail` window of the `system` session
-   (`tmux list-panes -t system:mail -F '#{pane_id} #{pane_current_command}'`).
+2. Find each PC's tuimail: here, the `mail` window of the `system` session
+   (`tmux list-panes -t system:mail -F '#{pane_id} #{pane_current_command}'`); on another
+   PC, over `ssh <pc>`, every pane running it in its `at` server
+   (`tmux -L at list-panes -a -F '#{session_name}:#{window_name} #{pane_id} #{pane_current_command}'`;
+   a PC can have more than one), with the steps below sent through `ssh` too.
 3. Capture it first. If a composer is open, a draft is unsaved or a confirmation is
    asked, leave it and tell him; otherwise go on.
 4. `tmux respawn-pane -k -t <pane id> tuimail.exe ''` (the empty argument keeps tmux
