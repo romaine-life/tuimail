@@ -258,6 +258,9 @@ pub struct AccountState {
     /// with it.
     sign_in_offered: bool,
     sign_in_moving: bool,
+    /// Through the session, the account came online, and what this PC's keychain kept for it
+    /// (a sign-in, a password) was removed: the session signs in now, and no PC keeps one.
+    keychain_cleared: bool,
 }
 
 impl AccountState {
@@ -970,6 +973,7 @@ impl App {
             password_put_off: false,
             sign_in_offered: false,
             sign_in_moving: false,
+            keychain_cleared: false,
             waiting: Default::default(),
         });
         self.accounts.len() - 1
@@ -1391,16 +1395,27 @@ impl App {
                     self.accounts[i].state = State::Connecting;
                     return;
                 }
-                if state == State::Online && self.accounts[i].sign_in_moving {
-                    self.accounts[i].sign_in_moving = false;
-                    let key = crate::secrets::token_key(&self.accounts[i].id);
-                    let number = i + 1;
-                    tokio::spawn(async move {
-                        if let Err(e) = crate::secrets::keychain_delete(&key).await {
-                            logfile::failed("moving the sign-in to the session", Some(number), &e);
-                        }
-                    });
-                    self.info(format!("{name}: its sign-in is the session's now"));
+                let remote = (self.accounts[i].worker.as_ref()).is_some_and(Worker::is_remote);
+                if state == State::Online && remote && !self.accounts[i].keychain_cleared {
+                    self.accounts[i].keychain_cleared = true;
+                    if self.keychain && !self.demo {
+                        let key = (self.accounts[i].worker.as_ref())
+                            .map(|w| w.creds.keychain_key())
+                            .unwrap_or_default();
+                        let number = i + 1;
+                        tokio::spawn(async move {
+                            if let Err(e) = crate::secrets::keychain_delete(&key).await {
+                                logfile::failed(
+                                    "moving the sign-in to the session",
+                                    Some(number),
+                                    &e,
+                                );
+                            }
+                        });
+                    }
+                    if std::mem::take(&mut self.accounts[i].sign_in_moving) {
+                        self.info(format!("{name}: its sign-in is the session's now"));
+                    }
                 }
                 if let State::NeedPassword { refused } = &state {
                     let refused = *refused;
