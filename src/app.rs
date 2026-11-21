@@ -1380,6 +1380,11 @@ impl App {
         match event {
             E::State(state) => {
                 let name = self.account_name(i);
+                // Through the session, the link is back after being lost: the account catches
+                // up on what it missed, as at start.
+                let back = state == State::Connecting
+                    && matches!(self.accounts[i].state, State::Offline(_))
+                    && (self.accounts[i].worker.as_ref()).is_some_and(Worker::is_remote);
                 if let State::NeedPassword { refused: false } = &state
                     && self.offer_kept_sign_in(i)
                 {
@@ -1425,6 +1430,9 @@ impl App {
                     self.accounts[i].syncing.clear();
                 }
                 self.accounts[i].state = state;
+                if back {
+                    self.check(i, true);
+                }
             }
             E::Folders(folders) => {
                 let id = self.accounts[i].id.clone();

@@ -217,6 +217,9 @@ struct Task {
     next_send: u64,
     searches: HashMap<u64, FoundReply>,
     reads: HashMap<u64, ArchivedReply>,
+    /// A connection has been tried: until then (the app's first checks, made as it starts)
+    /// reads wait for it with the changes, rather than failing before it's known.
+    tried: bool,
 }
 
 impl Task {
@@ -237,9 +240,12 @@ impl Task {
         }
     }
 
-    /// The connection is up: every account opened, then what was held, in order.
+    /// The connection is up: every account opened and said to be connecting (the app checks
+    /// it, catching up on what it missed), then what was held, in order.
     fn up(&mut self, tx: UnboundedSender<ToSession>) {
         self.tx = Some(tx);
+        self.tried = true;
+        self.tell_all(State::Connecting);
         for (account, _) in &self.accounts {
             self.to_session(ToSession::Open {
                 account: account.clone(),
@@ -256,6 +262,17 @@ impl Task {
     /// The connection is gone: sends under way can't be known.
     fn down(&mut self, why: &str) {
         self.tx = None;
+        // The first try failed: the reads that waited for it fail now; changes still wait.
+        if !self.tried {
+            self.tried = true;
+            for (account, request) in std::mem::take(&mut self.held) {
+                if request.changes() {
+                    self.held.push_back((account, request));
+                } else if let Some(sink) = self.sink(&account) {
+                    worker::report_failure(&request, "offline".into(), sink);
+                }
+            }
+        }
         for (_, reply) in self.sends.drain() {
             let _ = reply.send(Err(
                 "The link to tuimail's session broke while sending: look in Sent before sending again"
@@ -286,6 +303,8 @@ impl Task {
             Cmd::Request { account, request } => {
                 if self.tx.is_some() {
                     self.to_session(ToSession::Request { account, request });
+                } else if !self.tried {
+                    self.held.push_back((account, request));
                 } else if request.changes() {
                     self.held.push_back((account.clone(), request));
                     let waiting = self.held.iter().filter(|(id, _)| *id == account).count();
@@ -399,6 +418,7 @@ async fn run(
         next_send: 0,
         searches: HashMap::new(),
         reads: HashMap::new(),
+        tried: false,
     };
     let mut incoming: Option<(UnboundedReceiver<FromSession>, Pump)> = None;
     let mut wait = RETRY_FIRST;
@@ -584,6 +604,30 @@ mod tests {
         // The session's worker tried the account's server, which isn't there, and said so.
         until(&mut events, |e| match e {
             Event::State(State::Offline(why)) if !why.contains("session") => Some(()),
+            _ => None,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn once_the_session_is_reached_every_account_is_said_to_be_connecting() {
+        let (checker, _) = checker("k1");
+        let shared = Arc::new(Shared::new(Vec::new(), None, checker).await.unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(session::serve(listener, shared));
+        let address = Address::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let link = Link::start(address, crate::net::tls_config(None).unwrap(), tokens());
+        let (worker, mut events) = worker(&link, account(closed_port()));
+        // Asked at once, as the app does as it starts, before the link has connected: it waits
+        // for the session rather than failing, and the session's worker answers it.
+        worker.use_password(Secret::new("password")).await;
+        worker.tx.send(Request::Folders).unwrap();
+        until(&mut events, |e| match e {
+            Event::State(State::Connecting) => Some(()),
+            Event::Failed { what, .. } if what == "listing folders" => {
+                panic!("failed before connecting")
+            }
             _ => None,
         })
         .await;

@@ -30,9 +30,12 @@ use crate::worker::{Event, Request};
 pub const PATH: &str = "/relay";
 /// Where the session says it's up (the Gateway's down alert, Kubernetes' probes).
 pub const HEALTH: &str = "/health";
-/// How often a PC sends a new token: well inside the five minutes one lasts, and often enough
-/// to keep the connection from looking idle to the Gateway.
-pub const TOKEN_EVERY: Duration = Duration::from_secs(120);
+/// How often a PC sends its token again. `romaine-auth home-token` gives back the token it
+/// holds while more than a minute of it is left, so a renewal can bring the same token with
+/// barely a minute to go: renewing more often than that minute means a fresh one always arrives
+/// before the last runs out (every two minutes, connections ended every few minutes). It also
+/// keeps the connection from looking idle to the Gateway.
+pub const TOKEN_EVERY: Duration = Duration::from_secs(30);
 /// The biggest message either side takes: a POP3 check's download ([`crate::worker`]'s
 /// `POP_BYTES`) with room for its framing.
 pub const MAX_MESSAGE: usize = 300 << 20;

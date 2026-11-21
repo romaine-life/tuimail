@@ -21,6 +21,6 @@ spec:
         - name: tuimail
           port: 80
       # A PC's connection is long-lived: it stays open while tuimail is, renewing its token
-      # every two minutes.
+      # every 30 seconds.
       timeouts:
         request: 0s
