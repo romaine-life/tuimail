@@ -10,10 +10,8 @@
 //! ends a connection whose newest token has run out. Messages are binary frames, one postcard
 //! encoded [`ToSession`] or [`FromSession`] each.
 
-// A PC's side, which tuimail itself uses once accounts go through the session (TUI-17's fourth
-// stage); until then only the tests connect with it.
-#[cfg_attr(not(test), allow(dead_code))]
 pub mod client;
+mod selftest;
 pub mod session;
 pub mod token;
 pub mod vault;

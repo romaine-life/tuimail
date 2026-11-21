@@ -1,0 +1,7 @@
+# The image builds from Cargo.toml, Cargo.lock, build.rs, src/ and themes/ alone.
+*
+!Cargo.toml
+!Cargo.lock
+!build.rs
+!src/
+!themes/

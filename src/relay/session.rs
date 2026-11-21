@@ -44,7 +44,7 @@ pub struct Options {
 
 impl Options {
     pub const USAGE: &str = "tuimail session --listen ADDRESS:PORT --state FOLDER \
-                             --key-file FILE --accounts FILE";
+                             --key-file FILE --accounts FILE (or --self-test)";
 
     pub fn parse(mut args: impl Iterator<Item = String>) -> Result<Self> {
         let (mut listen, mut state, mut key_file, mut accounts) = (None, None, None, None);
@@ -159,6 +159,15 @@ async fn give(creds: &Credentials, secret: Secret) {
     } else {
         creds.set(secret).await;
     }
+}
+
+/// `tuimail session ...`: the session, or with `--self-test` alone the image's smoke test.
+pub async fn main(args: impl Iterator<Item = String>) -> Result<()> {
+    let args: Vec<String> = args.collect();
+    if args == ["--self-test"] {
+        return super::selftest::run().await;
+    }
+    run(Options::parse(args.into_iter())?).await
 }
 
 pub async fn run(options: Options) -> Result<()> {

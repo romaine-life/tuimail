@@ -86,7 +86,7 @@ async fn run() -> Result<()> {
             return mcp::run(config::Config::load()?.data_dir, demo).await;
         }
         Some("session") => {
-            return relay::session::run(relay::session::Options::parse(args)?).await;
+            return relay::session::main(args).await;
         }
         Some("-h" | "--help") => return print(&help()?),
         Some("-V" | "--version") => {

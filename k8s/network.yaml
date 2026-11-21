@@ -1,0 +1,13 @@
+# Only the relay and its health check are reachable.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tuimail
+spec:
+  podSelector:
+    matchLabels:
+      app: tuimail
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: 8080

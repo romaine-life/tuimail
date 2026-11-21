@@ -330,6 +330,22 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
         assert!(checker.check(&format!("{none}.{rest}")).await.is_err());
     }
 
+    /// Against OpenBao itself, by hand on a home PC: a token from `romaine-auth home-token --role
+    /// tuimail --out FILE`, named by `TUIMAIL_TOKEN_FILE`, passes the real published keys.
+    #[tokio::test]
+    #[ignore = "asks OpenBao: run by hand with TUIMAIL_TOKEN_FILE"]
+    async fn live_openbao_token_passes() {
+        let file = std::env::var("TUIMAIL_TOKEN_FILE").expect("TUIMAIL_TOKEN_FILE");
+        let json: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+        let token = json["token"].as_str().unwrap();
+        let checked = TokenChecker::openbao().check(token).await.unwrap();
+        assert!(!checked.device.is_empty());
+        let mut forged = token.to_string();
+        forged.pop();
+        forged.push(if token.ends_with('A') { 'B' } else { 'A' });
+        assert!(TokenChecker::openbao().check(&forged).await.is_err());
+    }
+
     #[tokio::test]
     async fn an_unreachable_key_source_refuses_rather_than_passes() {
         let checker = TokenChecker::with_fetch(Box::new(|| {

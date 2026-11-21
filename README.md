@@ -351,6 +351,7 @@ tuimail session --listen 0.0.0.0:8080 --state /state --key-file /keys/session.ke
 - **Who can connect.** Each connection proves itself with a five-minute token OpenBao signs for the home PC (role `tuimail`), renewed in the connection every two minutes; the session checks it against OpenBao's published keys and ends a connection whose token has run out. The session has no login of its own.
 - **Its store.** `session.db` in `--state`, SQLCipher, encrypted with the 256-bit key in `--key-file` (64 hex digits). Only a Linux build has SQLCipher; others refuse to run the session.
 - **Health and log.** `/health` answers `ok`. The log goes to stdout, the same lines and the same privacy as `tuimail.log`.
+- **At home** it runs on the home cluster from this repository's `k8s/` (namespace `tuimail`, synced by home-cluster's Argo CD), its image built from `Dockerfile` and pinned in `k8s/deployment.yaml` by each release. Its accounts are OpenBao's `secret/home/tuimail` (the PCs' own), its key `secret/services/tuimail` (`key`), with a recovery copy in Key Vault `romaine-kv` (`tuimail-session-key`). `tuimail session --self-test` is the image's smoke test, run read-only on every PR that changes it: the store is encrypted, the system's certificates are there, and the relay takes a good token and refuses others.
 
 PCs going through the session, and the archive it will keep, are still to come (TUI-17).
 

@@ -1,0 +1,12 @@
+# The session's store (session.db, encrypted): the accounts' sign-ins now, and the mail archive
+# once TUI-17 adds it, which is why it's sized for years of two mailboxes. On the VM's disk;
+# nelsong6/nas-backup copies it to the NAS and, encrypted again, to pCloud.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: state
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 50Gi

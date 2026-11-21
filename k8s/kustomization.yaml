@@ -1,0 +1,11 @@
+# tuimail's session on the home cluster (nelsong6/home-cluster), synced by its Argo CD (TUI-17).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: tuimail
+resources:
+  - secrets.yaml
+  - data.yaml
+  - deployment.yaml
+  - service.yaml
+  - network.yaml
+  - route.yaml

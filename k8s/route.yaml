@@ -1,0 +1,26 @@
+# The annotations are its down alert: homesvc health on the NAS checks the URL each minute,
+# and points tuimail.home.romaine.life at the cluster. The Gateway's TLS is the only way in, so
+# mail never crosses the LAN in plain text.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: tuimail
+  annotations:
+    home.romaine.life/health-url: https://tuimail.home.romaine.life/health
+    home.romaine.life/health-title: tuimail session
+    home.romaine.life/health-down: "tuimail's session is down: PCs that go through it can't check, read or send mail until it's back."
+spec:
+  parentRefs:
+    - name: home
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - tuimail.home.romaine.life
+  rules:
+    - backendRefs:
+        - name: tuimail
+          port: 80
+      # A PC's connection is long-lived: it stays open while tuimail is, renewing its token
+      # every two minutes.
+      timeouts:
+        request: 0s

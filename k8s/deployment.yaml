@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tuimail
+spec:
+  replicas: 1
+  # One at a time: the store has one writer, and each account one sign-in.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tuimail
+  template:
+    metadata:
+      labels:
+        app: tuimail
+    spec:
+      imagePullSecrets:
+        - name: forgejo-registry
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+        # The secret's files are readable by this group alone (mode 0440 below).
+        fsGroup: 65534
+      initContainers:
+        # The volume comes world-writable, and the session keeps its store only in a folder of
+        # its own (config::make_private_dir): this gives /state to the session's user, alone.
+        - name: own-state
+          image: forgejo.romaine.life/romaine-life/tuimail:v0.2.5.0@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          command: ["sh", "-c", "chown 65534:65534 /state && chmod 700 /state"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN, FOWNER]
+          volumeMounts:
+            - name: state
+              mountPath: /state
+      containers:
+        - name: session
+          # Built, self-tested and pinned by pipeline-templates' release suite; no mutable tag.
+          image: forgejo.romaine.life/romaine-life/tuimail:v0.2.5.0@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          args:
+            - --listen
+            - 0.0.0.0:8080
+            - --state
+            - /state/session
+            - --key-file
+            - /secrets/key
+            - --accounts
+            - /secrets/accounts.toml
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            failureThreshold: 4
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: state
+              mountPath: /state
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: state
+        - name: secrets
+          secret:
+            secretName: session
+            defaultMode: 0440
