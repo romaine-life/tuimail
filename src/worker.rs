@@ -443,7 +443,7 @@ fn login_failed(error: &anyhow::Error) -> State {
 }
 
 /// Logs in with the account's password; a refused one is forgotten.
-async fn imap_login(creds: &Credentials, endpoint: &Endpoint) -> Result<(Session, Caps)> {
+pub async fn imap_login(creds: &Credentials, endpoint: &Endpoint) -> Result<(Session, Caps)> {
     let secret = creds.get().await?;
     let account = creds.account();
     match imap::connect(endpoint, account.username(), secret.expose(), account.auth).await {

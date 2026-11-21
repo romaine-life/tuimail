@@ -269,6 +269,7 @@ fn hints(app: &App) -> &'static str {
             PromptKind::Password(_) => "`Enter` log in · `Esc` later",
             PromptKind::Attach => "`Enter` attach · `Esc` cancel",
             PromptKind::Tag => "`Enter` tag · `Esc` cancel",
+            PromptKind::ArchiveSearch => "`Enter` search · `Esc` cancel · `Ctrl-u` clear",
         };
     }
     if app.picker.is_some() || app.help.is_some() || app.confirm.is_some() || app.palette.is_some()
@@ -345,6 +346,7 @@ fn prompt(frame: &mut Frame, app: &mut App, area: Rect) {
         ),
         Some(PromptKind::Attach) => " Attach a file: its full path, or drop it here ".into(),
         Some(PromptKind::Tag) => " New tag: one word, like work or receipts ".into(),
+        Some(PromptKind::ArchiveSearch) => format!(" {} Search the archive ", app.icons.search),
         None => return,
     };
     let width = area.width.min(80);
@@ -387,6 +389,7 @@ fn picker(frame: &mut Frame, app: &App, area: Rect) {
         PickerKind::Attachments => " `Enter` open · `s` save to Downloads · `Esc` close ",
         PickerKind::Tag { .. } => " `Enter` put on or take off · `Esc` cancel ",
         PickerKind::Changes(_) => " `Enter` undo · `Esc` close ",
+        PickerKind::Archive(_) => " `Enter` read · `Esc` close ",
     };
     // Links in columns: the site (from the whole URL, never from what the
     // link says), what it says, then the URL.

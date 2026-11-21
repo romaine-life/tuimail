@@ -83,14 +83,16 @@ impl Options {
 }
 
 /// An account as the session serves it.
-struct Served {
-    creds: Credentials,
-    endpoints: Endpoints,
+pub(super) struct Served {
+    pub(super) creds: Credentials,
+    pub(super) endpoints: Endpoints,
 }
 
 /// What every PC's connection shares.
 pub struct Shared {
-    accounts: HashMap<String, Served>,
+    pub(super) accounts: HashMap<String, Served>,
+    /// The store, where the archive is; none in tests that need no archive.
+    vault: Option<Arc<Vault>>,
     /// Their ids, in `accounts.toml`'s order.
     order: Vec<String>,
     checker: TokenChecker,
@@ -140,6 +142,7 @@ impl Shared {
         }
         Ok(Self {
             accounts: served,
+            vault,
             order,
             checker,
         })
@@ -177,7 +180,20 @@ pub async fn run(options: Options) -> Result<()> {
     let state = config::make_private_dir(&options.state)?;
     let key = Key::read(&options.key_file)?;
     let vault = Arc::new(Vault::open(&state.join(vault::FILE), &key)?);
-    let shared = Arc::new(Shared::new(accounts, Some(vault), TokenChecker::openbao()).await?);
+    let shared =
+        Arc::new(Shared::new(accounts, Some(vault.clone()), TokenChecker::openbao()).await?);
+    // Every account copied into the archive, for good (`archive.rs`).
+    let _archiving: Vec<_> = shared
+        .accounts
+        .values()
+        .map(|served| {
+            super::archive::keep(
+                vault.clone(),
+                served.creds.clone(),
+                served.endpoints.clone(),
+            )
+        })
+        .collect();
     let listener = TcpListener::bind(options.listen)
         .await
         .with_context(|| format!("cannot listen on {}", options.listen))?;
@@ -306,6 +322,31 @@ impl Pc {
                 if let Some(served) = shared.accounts.get(&account) {
                     served.creds.retry();
                 }
+            }
+            ToSession::SearchArchive { id, query } => {
+                let (vault, tx) = (shared.vault.clone(), self.tx.clone());
+                // On a blocking thread: a search of a big archive reads a lot.
+                tokio::task::spawn_blocking(move || {
+                    let result = match vault {
+                        Some(vault) => vault
+                            .search_archive(&query, super::archive::MAX_FOUND)
+                            .map_err(|e| text::one_line(&format!("{e:#}"), 300)),
+                        None => Err("the session keeps no archive".into()),
+                    };
+                    let _ = tx.send(FromSession::Found { id, result });
+                });
+            }
+            ToSession::ReadArchived { id, message } => {
+                let (vault, tx) = (shared.vault.clone(), self.tx.clone());
+                tokio::task::spawn_blocking(move || {
+                    let result = match vault {
+                        Some(vault) => vault
+                            .archived(message)
+                            .map_err(|e| text::one_line(&format!("{e:#}"), 300)),
+                        None => Err("the session keeps no archive".into()),
+                    };
+                    let _ = tx.send(FromSession::Archived { id, result });
+                });
             }
         }
     }

@@ -136,6 +136,16 @@ pub enum AppEvent {
         account: String,
         result: Result<crate::oauth::Tokens, String>,
     },
+    /// What a search of the session's archive found.
+    ArchiveFound {
+        query: String,
+        result: Result<Vec<crate::relay::archive::Found>, String>,
+    },
+    /// An archived message's bytes, to read.
+    ArchivedRead {
+        message: i64,
+        result: Result<Option<Vec<u8>>, String>,
+    },
     /// This PC's keychain had the account's sign-in, from before it went through tuimail's
     /// session: the session takes it over.
     KeptSignIn { account: String, secret: Secret },
@@ -284,6 +294,9 @@ pub struct Reader {
     pub error: Option<String>,
     /// The plain part (true) or the HTML (false), chosen with `H`.
     pub plain: Option<bool>,
+    /// A message from the session's archive (its number there), not one in a folder: read,
+    /// replied to and forwarded, never changed.
+    pub archived: Option<i64>,
     /// Opened with Enter (marked read at once), not just shown beside the
     /// list.
     opened_at: Instant,
@@ -303,6 +316,8 @@ pub enum PromptKind {
     Attach,
     /// A new tag for [`App::tagging`].
     Tag,
+    /// Words to find in the session's archive.
+    ArchiveSearch,
 }
 
 pub struct Prompt {
@@ -341,6 +356,8 @@ pub enum PickerKind {
     Attachments,
     /// Changes to undo, by id, in the items' order.
     Changes(Vec<i64>),
+    /// Archived messages, by the archive's number, in the items' order.
+    Archive(Vec<i64>),
     /// A tag to put on these messages or take off, or (the last item) a
     /// new one to type.
     Tag {
@@ -633,6 +650,8 @@ pub struct App {
     agent_downloads: HashMap<(usize, String, u32), Instant>,
     /// Agents' downloads in the last hour: when, and how big.
     agent_fetched: VecDeque<(Instant, u64)>,
+    /// When agents read archived messages, for the hourly limit.
+    archive_reads: VecDeque<Instant>,
     /// Agents' changes in the last hour: when, how many messages, how
     /// many to Trash (the hourly limits).
     agent_spent: VecDeque<(Instant, usize, usize)>,
@@ -695,6 +714,20 @@ fn agent_date(timestamp: i64) -> Option<String> {
 /// A message for an agent: `header` with who it's from and to, its
 /// subject, attachments and text, links shown by their site only. Lays out
 /// HTML: only on a big-stack thread (`mail::in_background`).
+/// The folder an archived message shows as in the reader (with UID 0, never a real one).
+const ARCHIVED: &str = "Archive (kept by the session)";
+
+/// Said where there's no archive to search: tuimail here doesn't go through its session.
+const NO_ARCHIVE: &str = "The archive is the session's, and this tuimail doesn't go through it                           (the session setting)";
+
+/// A folder's name as shown, from its name on the server, without its account's folder list.
+fn shown_folder(folder: &str) -> String {
+    text::one_line(
+        &crate::utf7::decode(folder).unwrap_or_else(|| folder.to_string()),
+        60,
+    )
+}
+
 fn agent_text(raw: &[u8], max: usize, mut out: serde_json::Value) -> agent::Answer {
     let parsed = mail::parse(raw).ok_or("This message couldn't be read")?;
     let text = agent::hide_links(&mail::plain_text(&parsed));
@@ -812,6 +845,7 @@ impl App {
             agent_reads: Vec::new(),
             agent_downloads: HashMap::new(),
             agent_fetched: VecDeque::new(),
+            archive_reads: VecDeque::new(),
             agent_spent: VecDeque::new(),
             agent_unsubscribes: HashMap::new(),
             next_unsubscribe: 0,
@@ -1327,6 +1361,8 @@ impl App {
             AppEvent::Failed { error } => self.error(error),
             AppEvent::SignInOpened { url } => self.open_sign_in(&url),
             AppEvent::SignedIn { account, result } => self.on_signed_in(&account, result),
+            AppEvent::ArchiveFound { query, result } => self.on_archive_found(&query, result),
+            AppEvent::ArchivedRead { message, result } => self.on_archived_read(message, result),
             AppEvent::KeptSignIn { account, secret } => {
                 if let Some(i) = self.account_index(&account)
                     && let Some(worker) = &self.accounts[i].worker
@@ -2214,6 +2250,7 @@ impl App {
             scroll: 0,
             error: None,
             plain: None,
+            archived: None,
             opened_at: if enter {
                 Instant::now() - PREVIEW_READ_AFTER
             } else {
@@ -2282,7 +2319,7 @@ impl App {
     }
 
     fn mark_reader_read(&mut self) {
-        let Some(reader) = self.reader.as_mut() else {
+        let Some(reader) = self.reader.as_mut().filter(|r| r.archived.is_none()) else {
             return;
         };
         reader.marked_read = true;
@@ -2424,6 +2461,9 @@ impl App {
     }
 
     fn toggle_flag(&mut self, flag: FlagKind) {
+        if self.reading_archive() {
+            return;
+        }
         let targets = self.targets();
         let Some(first) = targets.first() else {
             return;
@@ -2471,6 +2511,9 @@ impl App {
 
     /// `t`: picks a tag to put on the messages or take off, or a new one.
     fn pick_tag(&mut self) {
+        if self.reading_archive() {
+            return;
+        }
         let targets = self.targets();
         if targets.is_empty() {
             return;
@@ -3143,6 +3186,8 @@ impl App {
             Call::SearchMessages(args) => self.agent_search(&args),
             Call::ListChanges(args) => Ok(self.agent_changes(args.limit)),
             Call::ReadMessage(args) => return self.agent_read(args, reply),
+            Call::SearchArchive(args) => return self.agent_search_archive(args, reply),
+            Call::ReadArchived(args) => return self.agent_read_archived(args, reply),
             _ => Err("That isn't something tuimail does".into()),
         };
         let _ = reply.send(answer);
@@ -3893,6 +3938,255 @@ impl App {
         serde_json::json!(changes)
     }
 
+    /// An agent's search of the session's archive.
+    fn agent_search_archive(
+        &mut self,
+        args: agent::ArchiveSearchArgs,
+        reply: tokio::sync::oneshot::Sender<agent::Answer>,
+    ) {
+        let Some(link) = &self.link else {
+            let _ = reply.send(Err(NO_ARCHIVE.into()));
+            return;
+        };
+        let limit = args.limit.unwrap_or(20).clamp(1, 50);
+        let names = self.names_by_id();
+        let searching = link.search_archive(args.query);
+        tokio::spawn(async move {
+            let answer = searching.await.map(|found| {
+                let messages: Vec<_> = (found.into_iter().take(limit))
+                    .map(|f| {
+                        let places: Vec<_> = (f.places.iter())
+                            .map(|(account, folder, here)| {
+                                serde_json::json!({
+                                    "account": names.get(account).cloned().unwrap_or_else(|| account.clone()),
+                                    "folder": shown_folder(folder),
+                                    "still_there": here,
+                                })
+                            })
+                            .collect();
+                        serde_json::json!({
+                            "id": agent::archive_id(f.id),
+                            "date": agent_date(f.date),
+                            "from": agent::hide_links(&f.sender),
+                            "subject": agent::hide_links(&f.subject),
+                            "places": places,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({ "messages": messages })
+            });
+            let _ = reply.send(answer);
+        });
+    }
+
+    /// An agent's read of an archived message: within the hourly limit, its text laid out on a
+    /// big-stack thread, links by their site only.
+    fn agent_read_archived(
+        &mut self,
+        args: agent::ReadArgs,
+        reply: tokio::sync::oneshot::Sender<agent::Answer>,
+    ) {
+        let Some(n) = agent::archived_number(&args.id) else {
+            let _ = reply.send(Err(
+                "That isn't an archived message's id: search_archive gives them".into(),
+            ));
+            return;
+        };
+        let Some(link) = &self.link else {
+            let _ = reply.send(Err(NO_ARCHIVE.into()));
+            return;
+        };
+        let hour = Duration::from_secs(3600);
+        self.archive_reads.retain(|at| at.elapsed() < hour);
+        if self.archive_reads.len() >= agent::ARCHIVE_READS_PER_HOUR {
+            let _ = reply.send(Err(
+                "Agents have read as many archived messages as they may this hour".into(),
+            ));
+            return;
+        }
+        self.archive_reads.push_back(Instant::now());
+        let max = (args.max_chars)
+            .unwrap_or(agent::TEXT_CHARS)
+            .clamp(200, agent::MAX_TEXT_CHARS);
+        let reading = link.read_archived(n);
+        let id = args.id;
+        tokio::spawn(async move {
+            match reading.await {
+                Ok(Some(raw)) => mail::in_background(
+                    move || {
+                        let date = mail::summarize(&raw).date;
+                        agent_text(
+                            &raw,
+                            max,
+                            serde_json::json!({ "id": id, "date": agent_date(date) }),
+                        )
+                    },
+                    move |done| {
+                        let _ = reply.send(
+                            done.unwrap_or_else(|| Err("This message couldn't be read".into())),
+                        );
+                    },
+                ),
+                Ok(None) => {
+                    let _ = reply.send(Err("The archive has no such message".into()));
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                }
+            }
+        });
+    }
+
+    /// Whether the accounts go through tuimail's session, which keeps the archive.
+    pub fn goes_through_session(&self) -> bool {
+        self.link.is_some()
+    }
+
+    /// The message being read is the archive's: what changes mail says it can't, and does
+    /// nothing.
+    fn reading_archive(&mut self) -> bool {
+        let archived = self.focus == Focus::Reader
+            && self.reader.as_ref().is_some_and(|r| r.archived.is_some());
+        if archived {
+            self.info("This is the archive's copy: it's kept as it was, and can't be changed");
+        }
+        archived
+    }
+
+    /// Searches the session's archive for `query`; the results come as a picker.
+    fn search_archive(&mut self, query: &str) {
+        if query.is_empty() {
+            return;
+        }
+        let Some(link) = &self.link else {
+            return self.error(NO_ARCHIVE);
+        };
+        let searching = link.search_archive(query.to_string());
+        let (tx, query) = (self.tx.clone(), query.to_string());
+        self.info("Searching the archive…");
+        tokio::spawn(async move {
+            let result = searching.await;
+            let _ = tx.send(AppEvent::ArchiveFound { query, result });
+        });
+    }
+
+    fn on_archive_found(
+        &mut self,
+        query: &str,
+        result: Result<Vec<crate::relay::archive::Found>, String>,
+    ) {
+        let found = match result {
+            Ok(found) => found,
+            Err(e) => return self.error(format!("The archive: {e}")),
+        };
+        if found.is_empty() {
+            return self.info(format!(
+                "The archive has nothing for {}",
+                text::one_line(query, 60)
+            ));
+        }
+        let names = self.names_by_id();
+        let items = (found.iter())
+            .map(|f| {
+                let date = (f.date > 0)
+                    .then(|| chrono::DateTime::from_timestamp(f.date, 0))
+                    .flatten()
+                    .map(|d| {
+                        d.with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d")
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| "no date".into());
+                let place = f
+                    .places
+                    .first()
+                    .map_or(String::new(), |(account, folder, here)| {
+                        let account = names
+                            .get(account)
+                            .cloned()
+                            .unwrap_or_else(|| account.clone());
+                        let gone = if *here { "" } else { ", deleted there" };
+                        format!("{account} · {}{gone}", shown_folder(folder))
+                    });
+                format!(
+                    "{date}  {}  {}  ({place})",
+                    text::one_line(&f.sender, 40),
+                    f.subject
+                )
+            })
+            .collect();
+        self.picker = Some(Picker {
+            kind: PickerKind::Archive(found.iter().map(|f| f.id).collect()),
+            title: format!(" The archive: {} ", text::one_line(query, 40)),
+            items,
+            labels: Vec::new(),
+            selected: 0,
+        });
+    }
+
+    /// Fetches an archived message from the session, to read.
+    fn read_archived(&mut self, message: i64) {
+        let Some(link) = &self.link else {
+            return self.error(NO_ARCHIVE);
+        };
+        let reading = link.read_archived(message);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = reading.await;
+            let _ = tx.send(AppEvent::ArchivedRead { message, result });
+        });
+    }
+
+    /// Opens an archived message in the reader: as its own, in no folder, to read, reply to
+    /// and forward.
+    fn on_archived_read(&mut self, number: i64, result: Result<Option<Vec<u8>>, String>) {
+        let raw = match result {
+            Ok(Some(raw)) => raw,
+            Ok(None) => return self.error("The archive has no such message"),
+            Err(e) => return self.error(format!("The archive: {e}")),
+        };
+        if self.accounts.is_empty() {
+            return;
+        }
+        let message = crate::store::Message {
+            folder: ARCHIVED.into(),
+            uid: 0,
+            size: raw.len() as u32,
+            summary: mail::summarize(&raw),
+            flags: crate::store::Flags {
+                seen: true,
+                ..Default::default()
+            },
+            preview: String::new(),
+        };
+        self.reader = Some(Reader {
+            account: 0,
+            folder: ARCHIVED.into(),
+            uid: 0,
+            message,
+            raw: Some(Arc::new(raw)),
+            parsed: None,
+            body: None,
+            width: 0,
+            pending: None,
+            scroll: 0,
+            error: None,
+            plain: None,
+            archived: Some(number),
+            opened_at: Instant::now(),
+            marked_read: true,
+        });
+        self.focus = Focus::Reader;
+        self.render();
+    }
+
+    /// Each account's shown name by its id.
+    fn names_by_id(&self) -> HashMap<String, String> {
+        (self.accounts.iter())
+            .map(|a| (a.id.clone(), a.account.shown_name()))
+            .collect()
+    }
+
     fn agent_read(
         &mut self,
         args: agent::ReadArgs,
@@ -4330,6 +4624,9 @@ impl App {
     /// `d`: to Trash, or for good from Trash (asking first). Each account
     /// and folder that needs a question gets its own, one after another.
     fn delete(&mut self) {
+        if self.reading_archive() {
+            return;
+        }
         let targets = self.targets();
         self.deletes_waiting.clear();
         for (account, folder, uids) in Self::grouped(&targets) {
@@ -4428,6 +4725,9 @@ impl App {
 
     /// `e` archives, `!` moves to Junk: to the folder with `role`.
     fn move_to_role(&mut self, role: Role) {
+        if self.reading_archive() {
+            return;
+        }
         let targets = self.targets();
         for (account, folder, uids) in Self::grouped(&targets) {
             let target = self.accounts[account]
@@ -4466,6 +4766,9 @@ impl App {
 
     /// `m`: picks a folder to move to.
     fn pick_folder(&mut self) {
+        if self.reading_archive() {
+            return;
+        }
         let targets = self.targets();
         let groups = Self::grouped(&targets);
         let [(account, folder, uids)] = groups.as_slice() else {
@@ -4560,6 +4863,9 @@ impl App {
     fn draft_from(&mut self, key: (usize, String, u32), raw: Arc<Vec<u8>>, pending: Pending) {
         let account = self.accounts[key.0].account.clone();
         let kept = self.kept(&key);
+        // An archived message is in no folder here: a reply to it marks nothing answered.
+        let archived =
+            (self.reader.as_ref()).is_some_and(|r| r.key() == key && r.archived.is_some());
         let tx = self.tx.clone();
         let account_id = self.accounts[key.0].id.clone();
         mail::in_background(
@@ -4585,7 +4891,7 @@ impl App {
             move |result| {
                 let (kind, draft, draft_of, replying) = match result.flatten() {
                     Some((kind, draft, draft_of, kept)) => {
-                        let replying = (kind == Kind::Reply).then_some(kept);
+                        let replying = (kind == Kind::Reply && !archived).then_some(kept);
                         (kind, Some(draft), draft_of, replying)
                     }
                     None => (Kind::New, None, None, None),
@@ -5651,6 +5957,9 @@ impl App {
                 let text = self.search.clone().unwrap_or_default();
                 self.prompt = Some(Prompt::new(PromptKind::Search, &text));
             }
+            Run::SearchArchive => {
+                self.prompt = Some(Prompt::new(PromptKind::ArchiveSearch, ""));
+            }
             Run::Info => self.palette = Some(Palette::Info(info::lines())),
             Run::Palette => self.open_palette(),
             Run::Keys(_) => {
@@ -5695,6 +6004,7 @@ impl App {
                         }
                     }
                     PromptKind::Attach => self.attach(&text),
+                    PromptKind::ArchiveSearch => self.search_archive(text.trim()),
                     PromptKind::Tag => {
                         let groups = std::mem::take(&mut self.tagging);
                         match tags::normalize(&text) {
@@ -5814,6 +6124,11 @@ impl App {
                             self.prompt = Some(Prompt::new(PromptKind::Tag, ""));
                         }
                     },
+                    (PickerKind::Archive(ids), KeyCode::Enter) => {
+                        if let Some(&message) = ids.get(n) {
+                            self.read_archived(message);
+                        }
+                    }
                     (PickerKind::Changes(ids), KeyCode::Enter) => {
                         match ids
                             .get(n)
@@ -7149,6 +7464,78 @@ pub mod tests {
         app.on_key(key(KeyCode::Esc));
         assert_eq!(app.search, None);
         assert_eq!(app.items.len(), before);
+    }
+
+    #[tokio::test]
+    async fn an_archived_message_is_read_and_answered_but_never_changed() {
+        let mut app = app();
+        with_mail(&mut app);
+        let raw = b"From: Ann Lee <ann@example.com>\r\nTo: demo@example.com\r\nSubject: Boat insurance\r\nMessage-ID: <boat@example.com>\r\nDate: Thu, 3 Jan 2019 10:00:00 +0000\r\n\r\nThe renewal is attached.\r\n".to_vec();
+        app.on_archived_read(7, Ok(Some(raw)));
+        let reader = app.reader.as_ref().expect("the archived message is open");
+        assert_eq!(reader.archived, Some(7));
+        assert_eq!(app.focus, Focus::Reader);
+        let before: Vec<_> = app
+            .items
+            .iter()
+            .map(|it| it.message.flags.clone())
+            .collect();
+        for c in ['s', 'd', 'e', 't', 'm'] {
+            app.on_key(key(KeyCode::Char(c)));
+            assert!(
+                app.confirm.is_none() && app.picker.is_none(),
+                "{c} asked something"
+            );
+        }
+        let shown = app
+            .status
+            .as_ref()
+            .map(|s| s.text.clone())
+            .unwrap_or_default();
+        assert!(shown.contains("archive's copy"), "{shown}");
+        let after: Vec<_> = app
+            .items
+            .iter()
+            .map(|it| it.message.flags.clone())
+            .collect();
+        assert_eq!(before, after);
+        // A reply is written from it, and marks nothing answered when sent.
+        app.on_key(key(KeyCode::Char('r')));
+        app.wait_until(|app| app.composer.is_some()).await;
+        let composer = app.composer.as_ref().expect("the composer");
+        assert_eq!(composer.draft().subject, "Re: Boat insurance");
+        assert!(composer.replying.is_none());
+    }
+
+    #[test]
+    fn without_the_session_there_is_no_archive_to_search() {
+        let mut app = app();
+        let command = palette::find("search the archive").expect("the command");
+        assert!(command.unavailable(&app).unwrap().contains("session"));
+        let search = agent_now(
+            &mut app,
+            Call::SearchArchive(agent::ArchiveSearchArgs {
+                query: "boat".into(),
+                limit: None,
+            }),
+        );
+        assert!(search.unwrap_err().contains("session"));
+        let read = agent_now(
+            &mut app,
+            Call::ReadArchived(agent::ReadArgs {
+                id: "archive:7".into(),
+                max_chars: None,
+            }),
+        );
+        assert!(read.unwrap_err().contains("session"));
+        let bad = agent_now(
+            &mut app,
+            Call::ReadArchived(agent::ReadArgs {
+                id: "archive:x".into(),
+                max_chars: None,
+            }),
+        );
+        assert!(bad.unwrap_err().contains("search_archive"));
     }
 
     #[tokio::test]

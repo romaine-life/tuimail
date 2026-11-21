@@ -31,6 +31,11 @@ const RETRY_MOST: Duration = Duration::from_secs(60);
 /// How long getting a token may take.
 const TOKEN_FOR: Duration = Duration::from_secs(30);
 
+/// Where an archive search's answer goes.
+type FoundReply = oneshot::Sender<Result<Vec<super::archive::Found>, String>>;
+/// Where an archived message's bytes go.
+type ArchivedReply = oneshot::Sender<Result<Option<Vec<u8>>, String>>;
+
 /// What the app's side asks of the link's task.
 enum Cmd {
     Register {
@@ -57,6 +62,14 @@ enum Cmd {
     },
     Retry {
         account: String,
+    },
+    SearchArchive {
+        query: String,
+        reply: FoundReply,
+    },
+    ReadArchived {
+        message: i64,
+        reply: ArchivedReply,
     },
 }
 
@@ -133,6 +146,36 @@ impl Link {
         Self { cmds, task }
     }
 
+    /// Searches the session's archive.
+    pub fn search_archive(
+        &self,
+        query: String,
+    ) -> BoxFuture<'static, Result<Vec<super::archive::Found>, String>> {
+        let (reply, answer) = oneshot::channel();
+        let asked = self.cmds.send(Cmd::SearchArchive { query, reply });
+        Box::pin(async move {
+            asked.map_err(|_| "tuimail's session link has stopped".to_string())?;
+            answer
+                .await
+                .map_err(|_| "tuimail's session link has stopped".to_string())?
+        })
+    }
+
+    /// An archived message's bytes.
+    pub fn read_archived(
+        &self,
+        message: i64,
+    ) -> BoxFuture<'static, Result<Option<Vec<u8>>, String>> {
+        let (reply, answer) = oneshot::channel();
+        let asked = self.cmds.send(Cmd::ReadArchived { message, reply });
+        Box::pin(async move {
+            asked.map_err(|_| "tuimail's session link has stopped".to_string())?;
+            answer
+                .await
+                .map_err(|_| "tuimail's session link has stopped".to_string())?
+        })
+    }
+
     /// The account's worker: its requests go to the session, its events come from there.
     pub fn spawn(&self, creds: Credentials, endpoints: Endpoints, sink: Sink) -> Worker {
         let account = creds.account().id();
@@ -172,6 +215,8 @@ struct Task {
     credentials: HashMap<String, Secret>,
     sends: HashMap<u64, oneshot::Sender<Result<(), String>>>,
     next_send: u64,
+    searches: HashMap<u64, FoundReply>,
+    reads: HashMap<u64, ArchivedReply>,
 }
 
 impl Task {
@@ -216,6 +261,12 @@ impl Task {
                 "The link to tuimail's session broke while sending: look in Sent before sending again"
                     .into(),
             ));
+        }
+        for (_, reply) in self.searches.drain() {
+            let _ = reply.send(Err("lost tuimail's session".into()));
+        }
+        for (_, reply) in self.reads.drain() {
+            let _ = reply.send(Err("lost tuimail's session".into()));
         }
         self.tell_all(State::Offline(text::one_line(why, 300)));
     }
@@ -277,6 +328,24 @@ impl Task {
             Cmd::Retry { account } => {
                 self.to_session(ToSession::Retry { account });
             }
+            Cmd::SearchArchive { query, reply } => {
+                self.next_send += 1;
+                let id = self.next_send;
+                if self.to_session(ToSession::SearchArchive { id, query }) {
+                    self.searches.insert(id, reply);
+                } else {
+                    let _ = reply.send(Err("can't reach tuimail's session".into()));
+                }
+            }
+            Cmd::ReadArchived { message, reply } => {
+                self.next_send += 1;
+                let id = self.next_send;
+                if self.to_session(ToSession::ReadArchived { id, message }) {
+                    self.reads.insert(id, reply);
+                } else {
+                    let _ = reply.send(Err("can't reach tuimail's session".into()));
+                }
+            }
         }
     }
 
@@ -301,6 +370,16 @@ impl Task {
                     let _ = reply.send(error.map_or(Ok(()), Err));
                 }
             }
+            FromSession::Found { id, result } => {
+                if let Some(reply) = self.searches.remove(&id) {
+                    let _ = reply.send(result);
+                }
+            }
+            FromSession::Archived { id, result } => {
+                if let Some(reply) = self.reads.remove(&id) {
+                    let _ = reply.send(result);
+                }
+            }
         }
     }
 }
@@ -318,6 +397,8 @@ async fn run(
         credentials: HashMap::new(),
         sends: HashMap::new(),
         next_send: 0,
+        searches: HashMap::new(),
+        reads: HashMap::new(),
     };
     let mut incoming: Option<(UnboundedReceiver<FromSession>, Pump)> = None;
     let mut wait = RETRY_FIRST;
@@ -558,5 +639,75 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{error}").contains("can't reach tuimail's session"));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod archive_tests {
+    use super::*;
+    use crate::relay::session::{self, Shared};
+    use crate::relay::token::tests::{checker, good};
+    use crate::relay::vault::{Key, Vault};
+
+    #[tokio::test]
+    async fn a_pc_searches_and_reads_the_sessions_archive() {
+        let dir = std::env::temp_dir().join(format!("tuimail-pc-archive-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = Key::from_hex(&"ef".repeat(32)).unwrap();
+        let vault = Arc::new(Vault::open(&dir.join("session.db"), &key).unwrap());
+        let raw = b"From: ann@example.com\r\nSubject: Boat insurance\r\nMessage-ID: <b@x>\r\n\r\nRenewal attached.\r\n";
+        let id = vault.archive(raw, "Renewal attached.").unwrap();
+        let (checker, _) = checker("k1");
+        let shared = Arc::new(Shared::new(Vec::new(), Some(vault), checker).await.unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(session::serve(listener, shared));
+        let address = Address::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let tokens: TokenSource = Arc::new(|| Box::pin(async { Ok(good(300)) }));
+        let link = Link::start(address, crate::net::tls_config(None).unwrap(), tokens);
+        let found = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                // The link may still be connecting: a search then fails, and is asked again.
+                if let Ok(found) = link.search_archive("renewal".into()).await {
+                    return found;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, id);
+        assert_eq!(found[0].subject, "Boat insurance");
+        assert_eq!(link.read_archived(id).await.unwrap().unwrap(), raw);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Against the house's session itself, by hand on a home PC: this PC's own token (romaine-auth)
+/// gets it in, and it lists the accounts it serves.
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "reaches tuimail.home.romaine.life: run by hand on a home PC"]
+    async fn live_this_pc_reaches_the_session() {
+        let dir = std::env::temp_dir().join(format!("tuimail-live-session-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tokens = home_tokens(dir.join("token.json")).unwrap();
+        let address = Address::parse("https://tuimail.home.romaine.life").unwrap();
+        let mut connection =
+            client::connect(&address, crate::net::tls_config(None).unwrap(), tokens)
+                .await
+                .unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(20), connection.rx.recv())
+            .await
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        match first {
+            Some(FromSession::Accounts(ids)) => assert!(!ids.is_empty()),
+            other => panic!("{other:?}"),
+        }
     }
 }

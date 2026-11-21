@@ -10,6 +10,7 @@
 //! ends a connection whose newest token has run out. Messages are binary frames, one postcard
 //! encoded [`ToSession`] or [`FromSession`] each.
 
+pub mod archive;
 pub mod client;
 pub mod pc;
 mod selftest;
@@ -61,6 +62,10 @@ pub enum ToSession {
     Credential { account: String, secret: Secret },
     /// Tries the account's sign-in again after a refusal (the PC's `R`).
     Retry { account: String },
+    /// Searches the archive ([`archive`]), answered by [`FromSession::Found`] with the same `id`.
+    SearchArchive { id: u64, query: String },
+    /// An archived message's bytes, answered by [`FromSession::Archived`].
+    ReadArchived { id: u64, message: i64 },
 }
 
 /// What the session tells a PC.
@@ -74,6 +79,14 @@ pub enum FromSession {
         account: String,
         id: u64,
         error: Option<String>,
+    },
+    Found {
+        id: u64,
+        result: Result<Vec<archive::Found>, String>,
+    },
+    Archived {
+        id: u64,
+        result: Result<Option<Vec<u8>>, String>,
     },
 }
 

@@ -48,6 +48,8 @@ pub enum Run {
     Keys(&'static [(KeyCode, KeyModifiers)]),
     /// Opens the search box.
     Search,
+    /// Opens the search of the session's archive.
+    SearchArchive,
     /// Shows where this build came from.
     Info,
     /// Opens the palette: listed with the keys, not in the palette.
@@ -115,6 +117,14 @@ pub const COMMANDS: &[Command] = &[
         "search here and the server's folder; tag:work searches a tag",
         Where::Main,
         Run::Search,
+    ),
+    command(
+        MAIL,
+        "search the archive",
+        "",
+        "every message the session keeps, deleted ones too; \"a phrase\", OR, subject:word",
+        Where::Main,
+        Run::SearchArchive,
     ),
     command(
         MAIL,
@@ -548,6 +558,9 @@ impl Command {
                 .then(|| app.sidebar_rows().get(app.sidebar_selected).cloned())
                 .flatten()
         };
+        if self.run == Run::SearchArchive && !app.goes_through_session() {
+            return Some("only where tuimail goes through its session (the session setting)");
+        }
         match self.at {
             Where::Anywhere => None,
             Where::Writing | Where::From | Where::Files if writing.is_none() => {
@@ -589,7 +602,7 @@ impl Command {
     pub fn presses(&self) -> Vec<KeyEvent> {
         match self.run {
             Run::Keys(keys) => keys.iter().map(|&(c, m)| KeyEvent::new(c, m)).collect(),
-            Run::Search | Run::Info | Run::Palette => Vec::new(),
+            Run::Search | Run::SearchArchive | Run::Info | Run::Palette => Vec::new(),
         }
     }
 }
@@ -747,7 +760,8 @@ mod tests {
             assert!(seen.insert(command.name), "{} twice", command.name);
             assert!(!command.what.is_empty(), "{}", command.name);
             assert!(
-                command.keys.is_empty() == matches!(command.run, Run::Search | Run::Info),
+                command.keys.is_empty()
+                    == matches!(command.run, Run::Search | Run::SearchArchive | Run::Info),
                 "{}: only the palette's own have no key",
                 command.name
             );

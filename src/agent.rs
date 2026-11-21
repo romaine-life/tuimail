@@ -76,6 +76,8 @@ pub enum Call {
     ListChanges(ChangesArgs),
     UndoChange(UndoArgs),
     Unsubscribe(IdsArgs),
+    SearchArchive(ArchiveSearchArgs),
+    ReadArchived(ReadArgs),
 }
 
 impl Call {
@@ -204,6 +206,29 @@ pub struct IdsArgs {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NoArgs {}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveSearchArgs {
+    /// Words to find in the sender, recipients, subject or text: all must be there. "A phrase"
+    /// in quotes, OR between words for either, subject:word for the subject only.
+    pub query: String,
+    /// At most this many, best first (default 20, up to 50).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// An archived message's id for agents: `archive:<n>`, the archive's own number for it.
+pub fn archive_id(n: i64) -> String {
+    format!("archive:{n}")
+}
+
+pub fn archived_number(id: &str) -> Option<i64> {
+    id.strip_prefix("archive:")?.parse().ok().filter(|n| *n > 0)
+}
+
+/// The most archived messages agents read in an hour.
+pub const ARCHIVE_READS_PER_HOUR: usize = 200;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]

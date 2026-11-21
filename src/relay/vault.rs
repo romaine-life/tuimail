@@ -82,6 +82,7 @@ impl Vault {
         Self::key(&db, key).with_context(|| format!("cannot open {shown}"))?;
         db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;")?;
         db.execute_batch(SCHEMA)
+            .and_then(|()| db.execute_batch(super::archive::SCHEMA))
             .with_context(|| format!("cannot set up {shown}"))?;
         store::Store::protect(path).with_context(|| format!("cannot protect {shown}"))?;
         Ok(Self { db: Mutex::new(db) })
@@ -99,7 +100,7 @@ impl Vault {
             .context("the key isn't this store's")
     }
 
-    fn db(&self) -> std::sync::MutexGuard<'_, Connection> {
+    pub(super) fn db(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.db.lock().unwrap_or_else(|e| e.into_inner())
     }
 

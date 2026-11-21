@@ -898,3 +898,76 @@ async fn live_relay_sends_checks_and_keeps_the_sign_in_across_restarts() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+#[cfg_attr(not(greenmail), ignore = "needs GreenMail: GREENMAIL_CERT (live.rs)")]
+async fn live_the_archive_keeps_mail_after_it_leaves_the_server() {
+    use crate::relay::{archive, vault};
+    let _turn = SERVER.lock().await;
+    let dir = std::env::temp_dir().join(format!("tuimail-live-archive-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let key = vault::Key::from_hex(&"12".repeat(32)).unwrap();
+    let vault = vault::Vault::open(&dir.join(vault::FILE), &key).unwrap();
+
+    // bob writes to alice, with a word nothing else has.
+    let word = unique("pelican").replace('-', "");
+    let (bob, _bob_events) = start(account("bob", Protocol::Imap)).await;
+    send(&bob, "alice@example.com", &word).await;
+
+    let alice = account("alice", Protocol::Imap);
+    let tls = net::tls_config(alice.certificate.as_deref()).unwrap();
+    let endpoints = Endpoints::of(&alice, tls);
+    let creds = Credentials::new(Arc::new(alice), false);
+    creds.set(Secret::new("secret")).await;
+
+    // Archived, and found by a word of its text.
+    let found = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            archive::pass(&vault, &creds, &endpoints).await.unwrap();
+            let found = vault.search_archive(&word, 10).unwrap();
+            if !found.is_empty() {
+                return found;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .expect("archived in time");
+    assert_eq!(found.len(), 1);
+    assert!(
+        found[0]
+            .places
+            .iter()
+            .any(|(_, f, here)| f == "INBOX" && *here)
+    );
+    let raw = vault.archived(found[0].id).unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&raw).contains(&word));
+
+    // A second pass downloads nothing again.
+    let again = archive::pass(&vault, &creds, &endpoints).await.unwrap();
+    assert_eq!(again.kept, 0);
+
+    // Deleted on the server: the archive still has it, and says it left the inbox.
+    let (mut session, caps) = worker::imap_login(&creds, &endpoints.incoming)
+        .await
+        .unwrap();
+    imap::select(&mut session, "INBOX").await.unwrap();
+    let uids = imap::search(&mut session, &format!("BODY \"{word}\""))
+        .await
+        .unwrap();
+    assert!(!uids.is_empty());
+    imap::delete(&mut session, caps, &uids).await.unwrap();
+    imap::logout(session).await;
+    let after = archive::pass(&vault, &creds, &endpoints).await.unwrap();
+    assert!(after.gone >= 1, "{after:?}");
+    let found = vault.search_archive(&word, 10).unwrap();
+    assert_eq!(found.len(), 1);
+    assert!(
+        found[0]
+            .places
+            .iter()
+            .all(|(_, f, here)| f != "INBOX" || !*here)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

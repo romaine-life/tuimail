@@ -328,6 +328,13 @@ pub fn note(text: &'static str, number: Option<usize>) {
     }
 }
 
+/// Writes what an account's archive pass did: messages kept, places noted, places gone.
+pub fn counted(text: &'static str, number: usize, kept: usize, placed: usize, gone: usize) {
+    write(&format!(
+        "{text} account={number} kept={kept} placed={placed} gone={gone}"
+    ));
+}
+
 pub fn stopped() {
     write("stop");
 }
