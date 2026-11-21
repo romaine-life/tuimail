@@ -207,7 +207,7 @@ pub fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
 }
 
 /// The settings tuimail reads.
-const KNOWN: [&str; 17] = [
+const KNOWN: [&str; 18] = [
     "theme",
     "icons",
     "notifications",
@@ -225,6 +225,7 @@ const KNOWN: [&str; 17] = [
     "confirm_agents",
     "agent_changes_per_hour",
     "editor",
+    "session",
 ];
 
 pub fn path(data_dir: &Path) -> PathBuf {
@@ -234,6 +235,21 @@ pub fn path(data_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A setting added to `Settings` but not to `KNOWN` is said to be ignored at every start
+    /// though it's used (`session`, TUI-17).
+    #[test]
+    fn every_setting_is_known() {
+        let all = Settings {
+            downloads: Some(PathBuf::from("/x")),
+            ..Settings::default()
+        };
+        let table: toml::Table = toml::from_str(&toml::to_string(&all).unwrap()).unwrap();
+        for key in table.keys() {
+            assert!(KNOWN.contains(&key.as_str()), "{key} isn't in KNOWN");
+        }
+        assert_eq!(table.len(), KNOWN.len());
+    }
 
     #[test]
     fn saving_one_setting_keeps_what_the_file_gained_since_start() {
