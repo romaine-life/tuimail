@@ -304,8 +304,10 @@ async fn backup(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Respon
 }
 
 /// When a token that runs out at `expires` (Unix seconds) has run out.
+/// With the same few seconds' grace the token check allows, so a renewal on its way when the
+/// last token runs out still arrives.
 fn deadline(expires: i64) -> tokio::time::Instant {
-    let left = expires - chrono::Utc::now().timestamp();
+    let left = expires + super::token::LEEWAY - chrono::Utc::now().timestamp();
     tokio::time::Instant::now() + Duration::from_secs(left.max(0) as u64)
 }
 

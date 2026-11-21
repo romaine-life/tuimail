@@ -484,40 +484,67 @@ enum Step {
     Retry,
 }
 
+/// A token from `romaine-auth` with less than this left is fetched anew: `romaine-auth` gives
+/// back the token it holds while more than a minute of it is left, and two tuimail windows on
+/// one PC share its file, so one was seen to bring a token with 31 seconds left, which ran out
+/// before its first renewal.
+const FRESH_FOR: i64 = 120;
+
 /// Tokens for the session on a home PC: `romaine-auth home-token --role tuimail`, which keeps
-/// the token in `file` (in tuimail's private data folder) and reuses it while it lasts.
+/// the token in `file` (in tuimail's private data folder) and reuses it while it lasts. One
+/// with under [`FRESH_FOR`] left is made anew: its file is removed and `romaine-auth` asked again.
 pub fn home_tokens(file: std::path::PathBuf) -> Result<TokenSource> {
     let program = crate::tools::on_path("romaine-auth")
         .context("romaine-auth isn't installed, and it gets the tokens tuimail's session takes")?;
     Ok(Arc::new(move || {
         let (program, file) = (program.clone(), file.clone());
         Box::pin(async move {
-            let mut command = tokio::process::Command::new(&program);
-            command
-                .args(["home-token", "--role", "tuimail", "--out"])
-                .arg(&file)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .kill_on_drop(true);
-            let status = tokio::time::timeout(TOKEN_FOR, command.status())
-                .await
-                .map_err(|_| anyhow!(logfile::Class::Timeout.with("romaine-auth took too long")))?
-                .context("cannot run romaine-auth")?;
-            anyhow::ensure!(
-                status.success(),
-                "romaine-auth couldn't get a token ({status})"
-            );
-            let bytes = crate::config::read_capped(&file, 64 << 10)
-                .context("cannot read romaine-auth's token")?;
-            let json: serde_json::Value =
-                serde_json::from_slice(&bytes).context("romaine-auth's token isn't JSON")?;
-            json["token"]
-                .as_str()
-                .map(str::to_string)
-                .context("romaine-auth's file has no token")
+            let token = romaine_auth(&program, &file).await?;
+            if seconds_left(&token).is_some_and(|left| left >= FRESH_FOR) {
+                return Ok(token);
+            }
+            let _ = std::fs::remove_file(&file);
+            romaine_auth(&program, &file).await
         })
     }))
+}
+
+async fn romaine_auth(program: &std::path::Path, file: &std::path::Path) -> Result<String> {
+    let mut command = tokio::process::Command::new(program);
+    command
+        .args(["home-token", "--role", "tuimail", "--out"])
+        .arg(file)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let status = tokio::time::timeout(TOKEN_FOR, command.status())
+        .await
+        .map_err(|_| anyhow!(logfile::Class::Timeout.with("romaine-auth took too long")))?
+        .context("cannot run romaine-auth")?;
+    anyhow::ensure!(
+        status.success(),
+        "romaine-auth couldn't get a token ({status})"
+    );
+    let bytes =
+        crate::config::read_capped(file, 64 << 10).context("cannot read romaine-auth's token")?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&bytes).context("romaine-auth's token isn't JSON")?;
+    json["token"]
+        .as_str()
+        .map(str::to_string)
+        .context("romaine-auth's file has no token")
+}
+
+/// How many seconds a token has left, by its own `exp` (unchecked: the session checks it).
+fn seconds_left(token: &str) -> Option<i64> {
+    use base64::Engine;
+    let body = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(body)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Some(claims["exp"].as_i64()? - chrono::Utc::now().timestamp())
 }
 
 #[cfg(test)]
@@ -607,6 +634,14 @@ mod tests {
             _ => None,
         })
         .await;
+    }
+
+    #[test]
+    fn a_tokens_time_left_is_read_from_it() {
+        let left = seconds_left(&good(300)).unwrap();
+        assert!((295..=300).contains(&left), "{left}");
+        assert!(seconds_left(&good(-10)).unwrap() < 0);
+        assert_eq!(seconds_left("not a token"), None);
     }
 
     #[tokio::test]

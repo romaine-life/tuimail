@@ -28,7 +28,7 @@ const FETCH_FOR: Duration = Duration::from_secs(10);
 /// keys can't make the session ask OpenBao over and over.
 const REFETCH_AFTER: Duration = Duration::from_secs(60);
 /// How far a token's times may be off (OpenBao and the session share the cluster's clock).
-const LEEWAY: i64 = 30;
+pub const LEEWAY: i64 = 30;
 /// The longest token looked at.
 const MAX_TOKEN: usize = 8 << 10;
 

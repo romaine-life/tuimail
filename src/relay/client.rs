@@ -338,8 +338,9 @@ mod tests {
     #[tokio::test]
     async fn the_session_ends_a_connection_whose_token_ran_out() {
         let address = session(vec![]).await;
-        // Good for one more second, and never renewed in that time.
-        let mut connection = connect(&address, tls(), tokens(1)).await.unwrap();
+        // Run out 25 seconds ago: still let in within the grace, which ends 5 seconds from now,
+        // and never renewed in that time.
+        let mut connection = connect(&address, tls(), tokens(-25)).await.unwrap();
         assert!(matches!(
             next(&mut connection).await,
             FromSession::Accounts(_)
