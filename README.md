@@ -353,7 +353,9 @@ tuimail session --listen 0.0.0.0:8080 --state /state --key-file /keys/session.ke
 - **Health and log.** `/health` answers `ok`. The log goes to stdout, the same lines and the same privacy as `tuimail.log`.
 - **At home** it runs on the home cluster from this repository's `k8s/` (namespace `tuimail`, synced by home-cluster's Argo CD), its image built from `Dockerfile` and pinned in `k8s/deployment.yaml` by each release. Its accounts are OpenBao's `secret/home/tuimail` (the PCs' own), its key `secret/services/tuimail` (`key`), with a recovery copy in Key Vault `romaine-kv` (`tuimail-session-key`). `tuimail session --self-test` is the image's smoke test, run read-only on every PR that changes it: the store is encrypted, the system's certificates are there, and the relay takes a good token and refuses others.
 
-PCs going through the session, and the archive it will keep, are still to come (TUI-17).
+**A PC through the session.** With `session = "https://tuimail.home.romaine.life"` in `settings.toml`, every account goes through the session: one connection carries them all, and nothing on the PC signs in to the mail servers or keeps a sign-in. The PC proves itself with `romaine-auth home-token --role tuimail` (a home PC's own key), kept in `session-token.json` in the data folder. Signing in (`P`) still opens the browser here, and only the refresh token goes to the session, which keeps it; a password typed here goes to the session the same way. A sign-in this PC kept in its keychain from before is handed to the session the first time it asks, and removed from the keychain once the session is in with it. While the session can't be reached, the account says so, reads fail at once, changes wait and are made once it's back, and sending says it can't. A `session` that can't be used is said at start, and the accounts then connect nowhere rather than around it. `tuimail --check` says which way the accounts go. Accounts are the session's `accounts.toml` (OpenBao's `secret/home/tuimail`): one added only on a PC is said to be unknown to the session.
+
+The archive the session will keep is still to come (TUI-17).
 
 ## Privacy and security
 

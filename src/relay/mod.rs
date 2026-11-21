@@ -11,6 +11,7 @@
 //! encoded [`ToSession`] or [`FromSession`] each.
 
 pub mod client;
+pub mod pc;
 mod selftest;
 pub mod session;
 pub mod token;

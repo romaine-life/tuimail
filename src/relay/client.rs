@@ -69,16 +69,19 @@ impl Address {
     }
 }
 
-/// An open connection to the session; dropping it closes it.
+/// An open connection to the session; dropping it (its `task`) closes it.
 pub struct Connection {
     pub tx: UnboundedSender<ToSession>,
     pub rx: UnboundedReceiver<FromSession>,
-    task: JoinHandle<()>,
+    pub task: Pump,
 }
 
-impl Drop for Connection {
+/// The task that carries a connection's messages; dropping it ends the connection.
+pub struct Pump(JoinHandle<()>);
+
+impl Drop for Pump {
     fn drop(&mut self) {
-        self.task.abort();
+        self.0.abort();
     }
 }
 
@@ -171,7 +174,11 @@ pub async fn connect(
         }
         let _ = out.close().await;
     });
-    Ok(Connection { tx, rx, task })
+    Ok(Connection {
+        tx,
+        rx,
+        task: Pump(task),
+    })
 }
 
 #[cfg(test)]

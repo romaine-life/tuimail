@@ -293,11 +293,97 @@ pub struct Worker {
     pub creds: Credentials,
     pub endpoints: Endpoints,
     task: JoinHandle<()>,
+    /// Through tuimail's session (the `session` setting): the requests go there, and so do
+    /// sends, sign-ins and passwords.
+    remote: Option<crate::relay::pc::Remote>,
+}
+
+impl Worker {
+    /// A worker whose requests `forward` carries to the session.
+    pub fn remote(
+        tx: UnboundedSender<Request>,
+        creds: Credentials,
+        endpoints: Endpoints,
+        forward: JoinHandle<()>,
+        remote: crate::relay::pc::Remote,
+    ) -> Self {
+        Self {
+            tx,
+            creds,
+            endpoints,
+            task: forward,
+            remote: Some(remote),
+        }
+    }
+
+    /// Whether it goes through tuimail's session.
+    pub fn is_remote(&self) -> bool {
+        self.remote.is_some()
+    }
+
+    /// Sends a message as the account: through its SMTP server, or the session.
+    pub fn send(
+        &self,
+        from: String,
+        to: Vec<String>,
+        raw: Vec<u8>,
+    ) -> futures::future::BoxFuture<'static, Result<()>> {
+        match &self.remote {
+            Some(remote) => remote.send(from, to, raw),
+            None => Box::pin(send(
+                self.creds.clone(),
+                self.endpoints.smtp.clone(),
+                from,
+                to,
+                raw,
+            )),
+        }
+    }
+
+    /// A password typed in tuimail, used from now on (by the session, through it).
+    pub async fn use_password(&self, secret: crate::secrets::Secret) {
+        if let Some(remote) = &self.remote {
+            remote.credential(secret.clone());
+        }
+        self.creds.set(secret).await;
+    }
+
+    /// A sign-in made here, used from now on: through the session, only its refresh token
+    /// goes, which the session keeps; here, the tokens are kept in memory.
+    pub fn use_tokens(&self, tokens: crate::oauth::Tokens) {
+        match &self.remote {
+            Some(remote) => {
+                if let Some(refresh) = tokens.refresh {
+                    remote.credential(refresh);
+                }
+            }
+            None => self.creds.set_tokens(tokens),
+        }
+    }
+
+    /// A refresh token this PC kept from before it went through the session: the session's to
+    /// use and keep. Nothing for a worker of its own.
+    pub fn give_sign_in(&self, refresh: crate::secrets::Secret) {
+        if let Some(remote) = &self.remote {
+            remote.credential(refresh);
+        }
+    }
+
+    /// The user asks to sign in again (R).
+    pub fn retry(&self) {
+        self.creds.retry();
+        if let Some(remote) = &self.remote {
+            remote.retry();
+        }
+    }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
         self.task.abort();
+        if let Some(remote) = &self.remote {
+            remote.close();
+        }
     }
 }
 
@@ -338,6 +424,7 @@ pub fn spawn(creds: Credentials, endpoints: Endpoints, sink: Sink) -> Worker {
         creds,
         endpoints,
         task,
+        remote: None,
     }
 }
 
@@ -454,7 +541,7 @@ const RETRY_EVERY: Duration = Duration::from_secs(30);
 /// Tells the app a request failed: an Append by its id, a download by its
 /// message (the reader, a reply and agents' reads wait for it), anything
 /// else by what it was.
-fn report_failure(request: &Request, error: String, sink: &Sink) {
+pub fn report_failure(request: &Request, error: String, sink: &Sink) {
     match request {
         Request::Append { folder, id, .. } => sink(Event::Appended {
             folder: folder.clone(),

@@ -106,7 +106,7 @@ async fn run() -> Result<()> {
     let (accounts, warnings) = account::load(&account::path(&config.data_dir))?;
     let keychain = secrets::init_keychain();
     if check {
-        return print_check(&config, &accounts, &warnings, keychain);
+        return print_check(&config, &settings, &accounts, &warnings, keychain);
     }
     let unlogged = logfile::open(&config.data_dir, accounts.len()).err();
     let store = store::Store::open(&config.data_dir.join("tuimail.db"))
@@ -194,6 +194,7 @@ pub fn panic_hook() {
 /// `tuimail --check`: where things are and what tuimail found.
 fn print_check(
     config: &config::Config,
+    settings: &settings::Settings,
     accounts: &[account::Account],
     warnings: &[String],
     keychain: bool,
@@ -209,6 +210,17 @@ fn print_check(
             "none: passwords are asked for at each start"
         }
     );
+    let session = settings.session.trim();
+    if !session.is_empty() {
+        let usable = match relay::client::Address::parse(session) {
+            Ok(_) => "every account goes through it, signed in there".to_string(),
+            Err(e) => format!("can't be used, so accounts connect nowhere: {e:#}"),
+        };
+        out.push_str(&format!(
+            "session      {} ({usable})\n",
+            text::one_line(session, 80)
+        ));
+    }
     if accounts.is_empty() {
         out.push_str("accounts     none yet: start tuimail to add one\n");
     }

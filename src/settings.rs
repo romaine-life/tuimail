@@ -60,6 +60,10 @@ pub struct Settings {
     /// program as a full path: `["/usr/bin/vim"]`. Default: `$VISUAL` or
     /// `$EDITOR` found on `PATH`, else vi.
     pub editor: Vec<String>,
+    /// tuimail's session (`https://tuimail.home.romaine.life` at home): every account's mail
+    /// goes through it, with the sign-ins it keeps, and none is signed in to here. Empty: each
+    /// account connects to its own servers.
+    pub session: String,
 }
 
 impl Default for Settings {
@@ -82,6 +86,7 @@ impl Default for Settings {
             confirm_agents: true,
             agent_changes_per_hour: crate::agent::CHANGES_PER_HOUR,
             editor: Vec::new(),
+            session: String::new(),
         }
     }
 }

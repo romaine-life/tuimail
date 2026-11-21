@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
@@ -36,6 +36,8 @@ use crate::{fzt, info, net, tags, text, tools};
 
 /// The longest search or path typed or pasted, in characters.
 const MAX_PROMPT: usize = 4096;
+/// Where `romaine-auth` keeps the token for tuimail's session, in the data folder.
+const SESSION_TOKEN: &str = "session-token.json";
 /// Different keys read together, with nothing open to type in, that are
 /// taken for a paste and ignored rather than run as commands.
 const PASTED_KEYS: usize = 3;
@@ -134,6 +136,9 @@ pub enum AppEvent {
         account: String,
         result: Result<crate::oauth::Tokens, String>,
     },
+    /// This PC's keychain had the account's sign-in, from before it went through tuimail's
+    /// session: the session takes it over.
+    KeptSignIn { account: String, secret: Secret },
     /// The terminal closed, or tuimail was asked to stop (Unix signals).
     #[cfg_attr(not(unix), allow(dead_code))]
     Quit,
@@ -238,6 +243,11 @@ pub struct AccountState {
     password_put_off: bool,
     /// Changes (moves, flags, deletes) not yet made on the server.
     waiting: std::cell::Cell<usize>,
+    /// Through tuimail's session: this PC's own sign-in (its keychain's refresh token) was
+    /// offered to the session, once; it's removed from the keychain once the session is in
+    /// with it.
+    sign_in_offered: bool,
+    sign_in_moving: bool,
 }
 
 impl AccountState {
@@ -565,6 +575,12 @@ pub struct App {
     tx: UnboundedSender<AppEvent>,
     /// The system's keychain can be used.
     keychain: bool,
+    /// The connection to tuimail's session, when the `session` setting names one: every
+    /// account's worker goes through it (`relay::pc`).
+    link: Option<crate::relay::pc::Link>,
+    /// The `session` setting names a session that can't be used: accounts connect nowhere,
+    /// never around it.
+    session_broken: bool,
 
     pub place: Place,
     pub items: Vec<Item>,
@@ -825,7 +841,12 @@ impl App {
             test_rx: None,
             #[cfg(test)]
             test_sent: Default::default(),
+            link: None,
+            session_broken: false,
         };
+        if !demo {
+            app.link = app.session_link();
+        }
         for account in accounts {
             let password = passwords.remove(&account.id());
             app.add_account(account, password);
@@ -853,13 +874,13 @@ impl App {
             stored("set_folders", self.store.set_folders(&id, &local_folders()));
         }
         let folders = self.store.folders(&id).unwrap_or_default();
-        let worker = if self.demo {
+        let worker = if self.demo || self.session_broken {
             None
         } else {
             match net::tls_config(account.certificate.as_deref()) {
                 Ok(tls) => {
                     let creds = Credentials::new(account.clone(), self.keychain).numbered(number);
-                    if let Some(secret) = password {
+                    if let Some(secret) = password.clone() {
                         let creds = creds.clone();
                         // Set before the worker can ask for it.
                         futures::executor::block_on(creds.set(secret));
@@ -875,7 +896,17 @@ impl App {
                             });
                         }
                     });
-                    Some(worker::spawn(creds, endpoints, sink))
+                    Some(match &self.link {
+                        Some(link) => {
+                            let worker = link.spawn(creds, endpoints, sink);
+                            // A password typed in the add-account form: the session's to use.
+                            if let Some(secret) = password {
+                                futures::executor::block_on(worker.use_password(secret));
+                            }
+                            worker
+                        }
+                        None => worker::spawn(creds, endpoints, sink),
+                    })
                 }
                 Err(e) => {
                     logfile::failed("starting the account", Some(number), &e);
@@ -903,6 +934,8 @@ impl App {
             popped_once: false,
             pop_again: false,
             password_put_off: false,
+            sign_in_offered: false,
+            sign_in_moving: false,
             waiting: Default::default(),
         });
         self.accounts.len() - 1
@@ -1294,6 +1327,14 @@ impl App {
             AppEvent::Failed { error } => self.error(error),
             AppEvent::SignInOpened { url } => self.open_sign_in(&url),
             AppEvent::SignedIn { account, result } => self.on_signed_in(&account, result),
+            AppEvent::KeptSignIn { account, secret } => {
+                if let Some(i) = self.account_index(&account)
+                    && let Some(worker) = &self.accounts[i].worker
+                {
+                    worker.give_sign_in(secret);
+                    self.accounts[i].sign_in_moving = true;
+                }
+            }
             AppEvent::Quit => self.quit = true,
         }
     }
@@ -1303,6 +1344,23 @@ impl App {
         match event {
             E::State(state) => {
                 let name = self.account_name(i);
+                if let State::NeedPassword { refused: false } = &state
+                    && self.offer_kept_sign_in(i)
+                {
+                    self.accounts[i].state = State::Connecting;
+                    return;
+                }
+                if state == State::Online && self.accounts[i].sign_in_moving {
+                    self.accounts[i].sign_in_moving = false;
+                    let key = crate::secrets::token_key(&self.accounts[i].id);
+                    let number = i + 1;
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::secrets::keychain_delete(&key).await {
+                            logfile::failed("moving the sign-in to the session", Some(number), &e);
+                        }
+                    });
+                    self.info(format!("{name}: its sign-in is the session's now"));
+                }
                 if let State::NeedPassword { refused } = &state {
                     let refused = *refused;
                     let signs_in = crate::oauth::built_in(&self.accounts[i].account);
@@ -2843,6 +2901,69 @@ impl App {
         }
     }
 
+    /// Through tuimail's session, an account that signs in and that the session can't sign in
+    /// yet: this PC's keychain's sign-in for it, from before, is offered to the session, once.
+    /// Whether it's being looked for.
+    fn offer_kept_sign_in(&mut self, i: usize) -> bool {
+        let a = &mut self.accounts[i];
+        let remote = a.worker.as_ref().is_some_and(Worker::is_remote);
+        if !remote || a.sign_in_offered || !self.keychain || !crate::oauth::built_in(&a.account) {
+            return false;
+        }
+        a.sign_in_offered = true;
+        let (id, tx, number) = (a.id.clone(), self.tx.clone(), i + 1);
+        tokio::spawn(async move {
+            match crate::secrets::keychain_get(&crate::secrets::token_key(&id)).await {
+                Ok(Some(secret)) => {
+                    let _ = tx.send(AppEvent::KeptSignIn {
+                        account: id,
+                        secret,
+                    });
+                }
+                // None kept: the user signs in (P), as without the session.
+                Ok(None) => {
+                    let _ = tx.send(AppEvent::Worker {
+                        account: id,
+                        event: worker::Event::State(State::NeedPassword { refused: false }),
+                    });
+                }
+                Err(e) => {
+                    logfile::failed("moving the sign-in to the session", Some(number), &e);
+                    let _ = tx.send(AppEvent::Worker {
+                        account: id,
+                        event: worker::Event::State(State::NeedPassword { refused: false }),
+                    });
+                }
+            }
+        });
+        true
+    }
+
+    /// The link to tuimail's session the `session` setting names, if it names one; a setting
+    /// that can't be used is said, and the accounts then connect nowhere rather than around it.
+    fn session_link(&mut self) -> Option<crate::relay::pc::Link> {
+        let url = self.settings.session.trim().to_string();
+        if url.is_empty() {
+            return None;
+        }
+        let link = (|| {
+            let address = crate::relay::client::Address::parse(&url)?;
+            let tls = net::tls_config(None)?;
+            let data_dir = self.data_dir.as_ref().context("no data folder")?;
+            let tokens = crate::relay::pc::home_tokens(data_dir.join(SESSION_TOKEN))?;
+            anyhow::Ok(crate::relay::pc::Link::start(address, tls, tokens))
+        })();
+        match link {
+            Ok(link) => Some(link),
+            Err(e) => {
+                logfile::failed("reaching the session", None, &e);
+                self.error(format!("session: {e:#}"));
+                self.session_broken = true;
+                None
+            }
+        }
+    }
+
     // Signing in with Microsoft or Google (`oauth.rs`).
 
     /// Signs account `i` in again, in the browser.
@@ -2899,7 +3020,7 @@ impl App {
         match result {
             Ok(tokens) => {
                 if let Some(worker) = &self.accounts[i].worker {
-                    worker.creds.set_tokens(tokens);
+                    worker.use_tokens(tokens);
                 }
                 self.accounts[i].state = State::Connecting;
                 self.check(i, true);
@@ -4017,11 +4138,10 @@ impl App {
         let Some(worker) = &self.accounts[i].worker else {
             return self.unsubscribe_done(batch, n, false, "Not sent: this account can't send");
         };
-        let creds = worker.creds.clone();
-        let endpoint = worker.endpoints.smtp.clone();
+        let sending = worker.send(built.from, built.rcpts, built.raw);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let result = worker::send(creds, endpoint, built.from, built.rcpts, built.raw).await;
+            let result = sending.await;
             let _ = tx.send(AppEvent::Sent {
                 account: account_id,
                 result: result.map_err(|e| text::one_line(&format!("{e:#}"), 300)),
@@ -4632,12 +4752,11 @@ impl App {
             }
             return self.error("This account can't send: see the error at start");
         };
-        let creds = worker.creds.clone();
-        let endpoint = worker.endpoints.smtp.clone();
+        let sending = worker.send(sent.from, sent.rcpts, sent.raw);
         let tx = self.tx.clone();
         self.info("Sending…");
         tokio::spawn(async move {
-            let result = worker::send(creds, endpoint, sent.from, sent.rcpts, sent.raw).await;
+            let result = sending.await;
             let needs_password = result.as_ref().err().is_some_and(worker::needs_password);
             let _ = tx.send(AppEvent::Sent {
                 account: account_id,
@@ -5162,7 +5281,7 @@ impl App {
                 KeyCode::Char('R') => {
                     for i in 0..self.accounts.len() {
                         if let Some(worker) = &self.accounts[i].worker {
-                            worker.creds.retry();
+                            worker.retry();
                         }
                         self.check(i, true);
                     }
@@ -5609,8 +5728,7 @@ impl App {
         let Some(worker) = &self.accounts[i].worker else {
             return;
         };
-        let creds = worker.creds.clone();
-        futures::executor::block_on(creds.set(Secret::new(password)));
+        futures::executor::block_on(worker.use_password(Secret::new(password)));
         self.accounts[i].password_put_off = false;
         self.accounts[i].state = State::Connecting;
         self.check(i, true);
@@ -6134,8 +6252,10 @@ impl App {
             None if crate::oauth::built_in(&account) || password.is_empty() => None,
             None => Some((account.id(), Secret::new(password.clone()))),
         };
+        // Through tuimail's session, the session keeps it (given below), never this keychain.
         if account.password == PasswordFrom::Keychain
             && !self.demo
+            && self.link.is_none()
             && let Some((key, secret)) = kept
         {
             let tx = self.tx.clone();
@@ -6154,7 +6274,7 @@ impl App {
         let password = tokens.is_none().then(|| Secret::new(password));
         let i = self.add_account(account, password);
         if let (Some(tokens), Some(worker)) = (tokens, &self.accounts[i].worker) {
-            worker.creds.set_tokens(tokens);
+            worker.use_tokens(tokens);
         }
         let inbox = self.accounts[i].inbox();
         self.open_place(Place::Folder {
@@ -6522,6 +6642,35 @@ pub mod tests {
         app.status = None;
         app.test_rx = Some(rx);
         app
+    }
+
+    /// A session setting that can't be used: the accounts connect nowhere, never around it.
+    #[tokio::test]
+    async fn a_session_setting_that_cant_be_used_connects_nowhere() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let settings = Settings {
+            session: "http://tuimail.example.com".into(),
+            ..Settings::default()
+        };
+        let accounts = crate::demo::accounts();
+        let app = App::with_passwords(
+            Store::in_memory(),
+            settings,
+            accounts[..1].to_vec(),
+            HashMap::new(),
+            false,
+            None,
+            tx,
+        );
+        assert!(app.link.is_none() && app.session_broken);
+        assert!(app.accounts[0].worker.is_none());
+        assert!(matches!(app.accounts[0].state, State::Offline(_)));
+        let shown = app
+            .status
+            .as_ref()
+            .map(|s| s.text.clone())
+            .unwrap_or_default();
+        assert!(shown.contains("session:"), "{shown}");
     }
 
     impl App {
