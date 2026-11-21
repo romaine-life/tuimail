@@ -20,6 +20,7 @@ mod notify;
 mod oauth;
 mod palette;
 mod pop3;
+mod relay;
 mod secrets;
 mod settings;
 mod setup;
@@ -83,6 +84,9 @@ async fn run() -> Result<()> {
                 ),
             };
             return mcp::run(config::Config::load()?.data_dir, demo).await;
+        }
+        Some("session") => {
+            return relay::session::run(relay::session::Options::parse(args)?).await;
         }
         Some("-h" | "--help") => return print(&help()?),
         Some("-V" | "--version") => {
@@ -274,6 +278,8 @@ keys or vim keys.
 
 Usage: tuimail [-h | --help] [-V | --version] [--check] [--demo]
        tuimail mcp [--demo]
+       tuimail session --listen ADDRESS:PORT --state FOLDER --key-file FILE
+                       --accounts FILE
 
 Inside the app, ? lists the keys and q quits. The first start asks for
 an account: your address and password, the servers filled in for the
@@ -287,6 +293,9 @@ tag, move and move to Trash; each change shows, can be undone with z,
 and asks you first unless you turn that off. Nothing is deleted or sent.
 tuimail mcp --demo reaches tuimail --demo instead, to try it on made-up
 mail.
+
+tuimail session is the house's one sign-in to each account, run on a
+server (the README's Session): PCs' tuimail reach mail through it.
 
 Passwords are kept in the system's keychain (or asked for each start,
 or printed by a command of yours: see the README). Accounts, settings

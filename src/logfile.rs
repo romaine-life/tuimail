@@ -27,6 +27,9 @@ pub const OLD_FILE: &str = "tuimail.log.old";
 const MAX_SIZE: u64 = 1 << 20;
 
 static LOG: OnceLock<PathBuf> = OnceLock::new();
+/// The session (`tuimail session`) writes its lines to stdout instead, where its pod's log is
+/// shipped to the house's log pile; the same words, so the same privacy.
+static TO_STDOUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// What sort of failure it was. Only static words and numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -275,6 +278,13 @@ fn append(path: &Path, text: &str) -> std::io::Result<()> {
 }
 
 fn write(text: &str) {
+    if TO_STDOUT.load(std::sync::atomic::Ordering::Relaxed) {
+        let now = Local::now().to_rfc3339_opts(SecondsFormat::Millis, false);
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{now} {text}");
+        let _ = out.flush();
+        return;
+    }
     if let Some(path) = LOG.get() {
         let _ = append(path, text);
     }
@@ -298,6 +308,24 @@ pub fn join(data_dir: &Path) -> std::io::Result<()> {
     adding().open(&path)?;
     let _ = LOG.set(path);
     Ok(())
+}
+
+/// Starts the log on stdout, saying so: for the session, whose pod's output is its log.
+pub fn to_stdout(accounts: usize) {
+    TO_STDOUT.store(true, std::sync::atomic::Ordering::Relaxed);
+    write(&format!(
+        "start session version={} accounts={accounts}",
+        crate::info::VERSION
+    ));
+}
+
+/// Writes a line of static words and numbers: the session's own events (a PC connected or
+/// was refused), which have no error to sort.
+pub fn note(text: &'static str, number: Option<usize>) {
+    match number {
+        Some(n) => write(&format!("{text} account={n}")),
+        None => write(text),
+    }
 }
 
 pub fn stopped() {

@@ -30,7 +30,7 @@ const MAX_DEPTH: usize = 2_000;
 const MAX_TEXT: usize = 4 << 20;
 
 /// A name and an address, as in From or To.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Addr {
     pub name: String,
     pub addr: String,
@@ -73,7 +73,7 @@ impl Addr {
 }
 
 /// What the list needs of a message, from its headers.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Summary {
     /// Without the angle brackets.
     pub message_id: String,

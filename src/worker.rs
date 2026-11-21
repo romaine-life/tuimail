@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use rustls::ClientConfig;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 
@@ -36,7 +37,7 @@ const POP_MAX: usize = 60 << 20;
 const POP_BYTES: usize = 256 << 20;
 
 /// What the app asks an account's worker to do.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
     /// List the folders and their counts.
     Folders,
@@ -166,7 +167,7 @@ impl Request {
 }
 
 /// Whether the account can be reached.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum State {
     Connecting,
     Online,
@@ -177,7 +178,7 @@ pub enum State {
     },
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Synced {
     pub folder: String,
     pub uidvalidity: u32,
@@ -196,7 +197,7 @@ pub struct Synced {
     pub total: u32,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Popped {
     /// New messages: their POP3 id and text.
     pub new: Vec<(String, Vec<u8>)>,
@@ -212,7 +213,7 @@ pub struct Popped {
 }
 
 /// What a worker tells the app.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Event {
     State(State),
     Folders(Vec<Folder>),
@@ -274,7 +275,7 @@ pub enum Event {
         headers: Vec<Header>,
     },
     Failed {
-        what: &'static str,
+        what: String,
         error: String,
     },
     /// IDLE saw the inbox change.
@@ -470,7 +471,7 @@ fn report_failure(request: &Request, error: String, sink: &Sink) {
             }),
         }),
         _ => sink(Event::Failed {
-            what: request.what(),
+            what: request.what().into(),
             error,
         }),
     }
@@ -980,7 +981,7 @@ async fn run_pop(
                     sink(Event::State(state));
                     if !said {
                         sink(Event::Failed {
-                            what: "checking for mail",
+                            what: "checking for mail".into(),
                             error: text::one_line(&format!("{e:#}"), 300),
                         });
                     }

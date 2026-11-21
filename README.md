@@ -339,6 +339,21 @@ To try it on made-up mail: run `tuimail --demo`, turn agents on there, and add `
 
 What an agent reads goes to its AI provider, as anything else you show it. AI agents reach tuimail on macOS, Linux and Windows; there it's a named pipe only your own programs can open, and the path to give your agent is `C:\Program Files\at-home\tuimail\current\tuimail.exe` on a home PC, or wherever `tuimail.exe` is.
 
+## Session
+
+`tuimail session` is the house's one sign-in to each mail account, run on an always-on server (at home, the home cluster, as `https://tuimail.home.romaine.life`), as spotify-player's home cast has one session that signs in to Spotify. It serves the same `accounts.toml` the PCs have, and keeps what each account signs in with (a Microsoft or Google sign-in's refresh token, or a password) in its own encrypted store, once a login with it has worked.
+
+```sh
+tuimail session --listen 0.0.0.0:8080 --state /state --key-file /keys/session.key --accounts /config/accounts.toml
+```
+
+- **The relay.** A PC's tuimail connects at `/relay` (a WebSocket, through TLS at the server's front) and sends what its account's worker would have done (check a folder, download a message, set a flag, move, send); the session does it with its sign-in and sends back what happened. Each PC gets its own worker for each account it opens, all on the account's one sign-in.
+- **Who can connect.** Each connection proves itself with a five-minute token OpenBao signs for the home PC (role `tuimail`), renewed in the connection every two minutes; the session checks it against OpenBao's published keys and ends a connection whose token has run out. The session has no login of its own.
+- **Its store.** `session.db` in `--state`, SQLCipher, encrypted with the 256-bit key in `--key-file` (64 hex digits). Only a Linux build has SQLCipher; others refuse to run the session.
+- **Health and log.** `/health` answers `ok`. The log goes to stdout, the same lines and the same privacy as `tuimail.log`.
+
+PCs going through the session, and the archive it will keep, are still to come (TUI-17).
+
 ## Privacy and security
 
 - **Nothing fetched to read.** HTML is turned into text on your computer; pictures are shown by their description, never downloaded, so senders can't tell when you read their mail.

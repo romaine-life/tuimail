@@ -58,7 +58,7 @@ pub fn read_capped(path: &Path, cap: u64) -> std::io::Result<Vec<u8>> {
 }
 
 #[cfg(unix)]
-fn make_private_dir(dir: &Path) -> Result<PathBuf> {
+pub fn make_private_dir(dir: &Path) -> Result<PathBuf> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     let shown = shown(dir);
     let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
@@ -129,7 +129,7 @@ enum Entry {
 /// On Windows, a folder set with `TM_DATA_DIR` must be in your own profile,
 /// whose permissions are yours alone; tuimail doesn't set Windows ACLs.
 #[cfg(not(unix))]
-fn make_private_dir(dir: &Path) -> Result<PathBuf> {
+pub fn make_private_dir(dir: &Path) -> Result<PathBuf> {
     let shown = shown(dir);
     if var("TM_DATA_DIR").is_some() {
         let mine = ["USERPROFILE", "LOCALAPPDATA"]

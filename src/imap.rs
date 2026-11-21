@@ -730,7 +730,7 @@ pub async fn body(session: &mut Session, uid: u32) -> Result<Option<Vec<u8>>> {
 }
 
 /// Which flag a key changes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FlagKind {
     Seen,
     Flagged,

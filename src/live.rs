@@ -723,3 +723,178 @@ async fn live_a_change_made_offline_reaches_the_server_once_back() {
     let flags = &again.flags.iter().find(|(u, _)| *u == uid).unwrap().1;
     assert!(flags.flagged, "the change made offline reached the server");
 }
+
+/// The session (`tuimail session`) on this computer, serving alice and bob with what they sign
+/// in with kept in its encrypted store in `dir`, and tokens checked against the test key.
+async fn session_at(dir: &std::path::Path) -> crate::relay::client::Address {
+    use crate::relay::{session, token, vault};
+    let key = vault::Key::from_hex(&"ab".repeat(32)).unwrap();
+    let vault = Arc::new(vault::Vault::open(&dir.join(vault::FILE), &key).unwrap());
+    let (checker, _) = token::tests::checker("k1");
+    let accounts = vec![
+        account("alice", Protocol::Imap),
+        account("bob", Protocol::Imap),
+    ];
+    let shared = Arc::new(
+        session::Shared::new(accounts, Some(vault), checker)
+            .await
+            .unwrap(),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(session::serve(listener, shared));
+    crate::relay::client::Address::parse(&format!("http://127.0.0.1:{port}")).unwrap()
+}
+
+async fn relay_connect(
+    address: &crate::relay::client::Address,
+) -> crate::relay::client::Connection {
+    let tokens: crate::relay::client::TokenSource =
+        Arc::new(|| Box::pin(async { Ok(crate::relay::token::tests::good(300)) }));
+    crate::relay::client::connect(address, net::tls_config(None).unwrap(), tokens)
+        .await
+        .unwrap()
+}
+
+/// The next event for `account` that `pick` takes, within 20 s; a failure fails the test.
+async fn relayed<T>(
+    connection: &mut crate::relay::client::Connection,
+    mut pick: impl FnMut(&str, Event) -> Option<T>,
+) -> T {
+    use crate::relay::FromSession;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match connection
+                .rx
+                .recv()
+                .await
+                .expect("the session ended the connection")
+            {
+                FromSession::Event {
+                    event: Event::Failed { what, error },
+                    ..
+                } => panic!("{what}: {error}"),
+                FromSession::Event { account, event } => {
+                    if let Some(found) = pick(&account, event) {
+                        return found;
+                    }
+                }
+                FromSession::Sent {
+                    error: Some(error), ..
+                } => panic!("sending: {error}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("no such event in time")
+}
+
+#[tokio::test]
+#[cfg_attr(not(greenmail), ignore = "needs GreenMail: GREENMAIL_CERT (live.rs)")]
+async fn live_relay_sends_checks_and_keeps_the_sign_in_across_restarts() {
+    use crate::relay::{FromSession, ToSession};
+    let _turn = SERVER.lock().await;
+    let dir = std::env::temp_dir().join(format!("tuimail-live-session-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let alice = account("alice", Protocol::Imap);
+    let bob = account("bob", Protocol::Imap);
+    let (alice_id, bob_id) = (alice.id(), bob.id());
+
+    // A PC gives the session alice's and bob's passwords, as typed there.
+    let address = session_at(&dir).await;
+    let mut pc = relay_connect(&address).await;
+    match pc.rx.recv().await.unwrap() {
+        FromSession::Accounts(ids) => assert_eq!(ids, vec![alice_id.clone(), bob_id.clone()]),
+        other => panic!("{other:?}"),
+    }
+    for id in [&alice_id, &bob_id] {
+        pc.tx
+            .send(ToSession::Open {
+                account: id.clone(),
+            })
+            .unwrap();
+        pc.tx
+            .send(ToSession::Credential {
+                account: id.clone(),
+                secret: Secret::new("secret"),
+            })
+            .unwrap();
+    }
+
+    // alice sends to bob through the session.
+    let subject = unique("relayed");
+    let draft = Draft {
+        to: "bob@example.com".into(),
+        subject: subject.clone(),
+        body: "Through the session.\n".into(),
+        ..Draft::default()
+    };
+    let id = compose::new_message_id(&alice.email).unwrap();
+    let built = compose::build(&draft, &alice, &id, chrono::Utc::now().timestamp(), false).unwrap();
+    pc.tx
+        .send(ToSession::Send {
+            account: alice_id.clone(),
+            id: 7,
+            from: built.from,
+            to: built.rcpts,
+            raw: built.raw,
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let message = pc.rx.recv().await;
+            if let FromSession::Sent { id: 7, error, .. } =
+                message.expect("the session ended the connection")
+            {
+                assert_eq!(error, None);
+                return;
+            }
+        }
+    })
+    .await
+    .expect("sent in time");
+
+    // bob's check through the session finds it.
+    let found = async |pc: &mut crate::relay::client::Connection| {
+        for _ in 0..20 {
+            pc.tx
+                .send(ToSession::Request {
+                    account: bob_id.clone(),
+                    request: Request::Sync {
+                        folder: "INBOX".into(),
+                        known: Known::default(),
+                        count: 500,
+                    },
+                })
+                .unwrap();
+            let synced = relayed(pc, |account, event| match event {
+                Event::Synced(s) if account == bob_id => Some(s),
+                _ => None,
+            })
+            .await;
+            if synced.new.iter().any(|h| h.summary.subject == subject) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        false
+    };
+    assert!(found(&mut pc).await, "bob's inbox has what alice sent");
+    drop(pc);
+
+    // A new session on the same store needs nobody to give it the passwords again.
+    let address = session_at(&dir).await;
+    let mut pc = relay_connect(&address).await;
+    pc.tx
+        .send(ToSession::Open {
+            account: bob_id.clone(),
+        })
+        .unwrap();
+    assert!(
+        found(&mut pc).await,
+        "the restarted session signs in by itself"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

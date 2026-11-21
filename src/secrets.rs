@@ -26,8 +26,9 @@ const INTERACTIVE_TIMEOUT: Duration = Duration::from_secs(300);
 /// A command's output past this is refused, not read.
 const MAX_OUTPUT: u64 = 64 * 1024;
 
-/// A password or token. Its `Debug` never shows it.
-#[derive(Clone, PartialEq, Eq)]
+/// A password or token. Its `Debug` never shows it. It's serialized only to cross the relay
+/// to the session ([`crate::relay::ToSession::Credential`]).
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Secret(String);
 
 impl Secret {
@@ -194,7 +195,13 @@ pub struct Credentials {
     tokens: Arc<std::sync::Mutex<(u64, Option<Tokens>)>>,
     /// Held while refreshing: one refresh at a time.
     refreshing: Arc<Mutex<()>>,
+    /// Where a login's password or refresh token is kept once a login with it worked, instead of
+    /// the keychain: the session's encrypted store ([`crate::relay::vault`]).
+    keeper: Option<Keeper>,
 }
+
+/// Keeps the password or refresh token a login worked with.
+pub type Keeper = Arc<dyn Fn(&Secret) -> Result<()> + Send + Sync>;
 
 /// No password is known: tuimail must ask.
 #[derive(Debug)]
@@ -220,7 +227,15 @@ impl Credentials {
             keychain_refused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tokens: Arc::new(std::sync::Mutex::new((0, None))),
             refreshing: Arc::new(Mutex::new(())),
+            keeper: None,
         }
+    }
+
+    /// Kept by `keeper` from now on, never the keychain.
+    pub fn keeping(mut self, keeper: Keeper) -> Self {
+        self.keeper = Some(keeper);
+        self.keychain = false;
+        self
     }
 
     /// The keychain entry for what this account keeps there: its password,
@@ -249,7 +264,7 @@ impl Credentials {
 
     /// Whether the password comes from a command: run once and kept, or,
     /// for OAuth2, run for each login (tokens expire).
-    fn uses_command(&self) -> bool {
+    pub fn uses_command(&self) -> bool {
         self.account.password == PasswordFrom::Command
             || (self.account.auth == Auth::Oauth2 && !self.signs_in())
     }
@@ -406,7 +421,7 @@ impl Credentials {
     /// Signing in here, the refresh token is what's kept: the one that came
     /// with the access token the server took, not one no login has used.
     pub async fn remember(&self, used: &Secret) -> Result<()> {
-        if !self.uses_keychain() {
+        if !self.uses_keychain() && self.keeper.is_none() {
             return Ok(());
         }
         let kept = if self.signs_in() {
@@ -419,6 +434,9 @@ impl Credentials {
         let Some(secret) = kept else {
             return Ok(());
         };
+        if let Some(keeper) = &self.keeper {
+            return keeper(&secret);
+        }
         let key = self.keychain_key();
         if keychain_get(&key).await.ok().flatten().as_ref() == Some(&secret) {
             return Ok(());

@@ -1,6 +1,7 @@
 //! HTTP/1.1 POSTs of a form, over a connection made by `net.rs` (TLS, the
 //! system's verifier): sign-in's token requests (`oauth.rs`) and one-click
-//! unsubscribes (`unsubscribe.rs`). One request a connection, closed
+//! unsubscribes (`unsubscribe.rs`); and GETs, the session's fetch of OpenBao's
+//! published keys (`relay::token`). One request a connection, closed
 //! after, nothing followed (no redirects); the time limits are the
 //! caller's, and what's read is capped.
 
@@ -25,6 +26,26 @@ fn request(host: &str, path: &str, accept: &str, body: &str) -> Result<String> {
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     ))
+}
+
+/// GETs `path` and reads the answer: its status and body, at most [`MAX_RESPONSE`].
+pub async fn get<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    host: &str,
+    path: &str,
+    accept: &str,
+) -> Result<(u16, Vec<u8>)> {
+    let line_safe = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic());
+    if !line_safe(host) || !line_safe(path) || !line_safe(accept) {
+        bail!("that address can't be asked");
+    }
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: tuimail\r\n\
+         Accept: {accept}\r\nConnection: close\r\n\r\n"
+    );
+    send(stream, &request).await?;
+    let answer = read_until(stream, host, MAX_RESPONSE, |_| false).await?;
+    parse_response(&answer)
 }
 
 async fn send<S: AsyncWrite + Unpin>(stream: &mut S, request: &str) -> Result<()> {

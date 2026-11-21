@@ -8,6 +8,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 
 use crate::config;
 use crate::mail::{self, Addr, Summary};
@@ -19,7 +20,7 @@ pub struct Store {
 
 /// What a folder is for, from the server's SPECIAL-USE attributes or its
 /// name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Role {
     Inbox,
     Drafts,
@@ -60,7 +61,7 @@ impl Role {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Folder {
     /// The name on the server (modified UTF-7 for IMAP), used in commands.
     pub name: String,
@@ -74,7 +75,7 @@ pub struct Folder {
 }
 
 /// What's kept of a folder's state on the server, for the next sync.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Known {
     pub uidvalidity: u32,
     /// Every message with a UID from `low` to `high` is in the cache.
@@ -82,7 +83,7 @@ pub struct Known {
     pub high: u32,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Flags {
     pub seen: bool,
     pub flagged: bool,
@@ -160,7 +161,7 @@ const KEEP_CHANGES_FOR: i64 = 30 * 24 * 3600;
 const MAX_CHANGES: i64 = 1000;
 
 /// A message's headers as fetched, to store.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Header {
     pub uid: u32,
     pub summary: Summary,
@@ -386,7 +387,7 @@ impl Store {
 
     /// The database and its journal files readable only by you, whatever
     /// the umask.
-    fn protect(path: &Path) -> std::io::Result<()> {
+    pub fn protect(path: &Path) -> std::io::Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
