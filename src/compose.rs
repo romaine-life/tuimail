@@ -323,7 +323,7 @@ pub fn new_message_id(from: &str) -> Result<String> {
 
 /// 128 random bits as hex, from the system's generator. If it fails,
 /// nothing is sent: an id or boundary that isn't random says something.
-fn random_hex() -> Result<String> {
+pub fn random_hex() -> Result<String> {
     use ring::rand::SecureRandom;
     let mut bytes = [0u8; 16];
     ring::rand::SystemRandom::new()

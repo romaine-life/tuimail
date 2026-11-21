@@ -30,6 +30,10 @@ use crate::worker::{Event, Request};
 pub const PATH: &str = "/relay";
 /// Where the session says it's up (the Gateway's down alert, Kubernetes' probes).
 pub const HEALTH: &str = "/health";
+/// Where the NAS's backup job gets a snapshot of the store, still encrypted.
+pub const BACKUP: &str = "/backup";
+/// The one device whose token gets a snapshot.
+pub const BACKUP_DEVICE: &str = "nas";
 /// How often a PC sends its token again. `romaine-auth home-token` gives back the token it
 /// holds while more than a minute of it is left, so a renewal can bring the same token with
 /// barely a minute to go: renewing more often than that minute means a fresh one always arrives

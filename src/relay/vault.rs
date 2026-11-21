@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS credentials (
 ";
 
 /// A 256-bit key, given to SQLCipher as is (no passphrase to stretch).
+#[derive(Clone)]
 pub struct Key([u8; 32]);
 
 impl std::fmt::Debug for Key {
@@ -69,6 +70,8 @@ impl Key {
 
 pub struct Vault {
     db: Mutex<Connection>,
+    /// Its key, for snapshots, which are encrypted with it too.
+    key: Key,
 }
 
 impl Vault {
@@ -85,7 +88,10 @@ impl Vault {
             .and_then(|()| db.execute_batch(super::archive::SCHEMA))
             .with_context(|| format!("cannot set up {shown}"))?;
         store::Store::protect(path).with_context(|| format!("cannot protect {shown}"))?;
-        Ok(Self { db: Mutex::new(db) })
+        Ok(Self {
+            db: Mutex::new(db),
+            key: key.clone(),
+        })
     }
 
     /// Gives SQLCipher the key, after checking this build has SQLCipher, and checks the key
@@ -126,6 +132,27 @@ impl Vault {
              WHERE secret != excluded.secret",
             params![account, secret.expose(), now],
         )?;
+        Ok(())
+    }
+}
+
+impl Vault {
+    /// A consistent copy of the store at `dest`, encrypted with the same key: SQLite's backup,
+    /// page by page, so nothing is decrypted on the way; checked whole before it's given out.
+    pub fn snapshot(&self, dest: &Path) -> Result<()> {
+        let flags = rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let mut copy = Connection::open_with_flags(dest, flags)
+            .with_context(|| format!("cannot make {}", config::shown(dest)))?;
+        Self::key(&copy, &self.key)?;
+        {
+            let db = self.db();
+            let backup = rusqlite::backup::Backup::new(&db, &mut copy)?;
+            backup.run_to_completion(1024, std::time::Duration::ZERO, None)?;
+        }
+        let check: String = copy.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        anyhow::ensure!(check == "ok", "the snapshot fails its integrity check");
+        drop(copy);
+        store::Store::protect(dest)?;
         Ok(())
     }
 }
@@ -174,9 +201,17 @@ mod tests {
             vault.credential("a").unwrap().unwrap().expose(),
             "refresh-2"
         );
+        // A snapshot is the same, under the same key, and as unreadable.
+        let snapshot = dir.join("snapshot.db");
+        vault.snapshot(&snapshot).unwrap();
         drop(vault);
         // Nothing kept is readable in the file.
         let raw = std::fs::read(&path).unwrap();
+        assert!(!raw.windows(9).any(|w| w == b"refresh-2"));
+        assert!(!raw.starts_with(b"SQLite format 3"));
+        let copy = Vault::open(&snapshot, &key).unwrap();
+        assert_eq!(copy.credential("a").unwrap().unwrap().expose(), "refresh-2");
+        let raw = std::fs::read(&snapshot).unwrap();
         assert!(!raw.windows(9).any(|w| w == b"refresh-2"));
         assert!(!raw.starts_with(b"SQLite format 3"));
         // Another key doesn't open it.

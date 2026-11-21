@@ -64,7 +64,7 @@ ratatui = "0.30.2"
 ratatui-textarea = "0.9.3"
 ring = "0.17.14"
 rmcp = { version = "3.9.0", default-features = false, features = ["server", "macros", "transport-io"] }
-rusqlite = { version = "0.43", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled", "backup"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-platform-verifier = "0.7.1"
 schemars = "1.2.3"
@@ -73,6 +73,7 @@ serde_json = "1.0.154"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+tokio-util = { version = "0.7.20", features = ["io"] }
 toml = "1.1.6"
 unicode-normalization = "0.1.26"
 unicode-segmentation = "1.13.3"

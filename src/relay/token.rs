@@ -19,6 +19,9 @@ pub const ISSUER: &str = "https://bao.home.romaine.life/v1/identity/oidc";
 const KEYS_HOST: &str = "bao.home.romaine.life";
 const KEYS_PATH: &str = "/v1/identity/oidc/.well-known/keys";
 pub const AUDIENCE: &str = "tuimail";
+/// The audience of the token the NAS's backup job brings for the store's snapshot (`/backup`):
+/// OpenBao gives it to the NAS's device alone.
+pub const BACKUP_AUDIENCE: &str = "tuimail-backup";
 /// How long fetching OpenBao's keys may take.
 const FETCH_FOR: Duration = Duration::from_secs(10);
 /// The keys are fetched again for an unknown key at most this often, so tokens naming made-up
@@ -153,9 +156,14 @@ impl TokenChecker {
             .ok_or_else(|| "the token's signing key isn't one of OpenBao's".into())
     }
 
-    /// Checks an ES256 token: its signature by the OpenBao key it names, its issuer, that it's
-    /// for the session, and its times.
+    /// Checks a PC's token: for the session ([`AUDIENCE`]).
     pub async fn check(&self, token: &str) -> Result<Checked, String> {
+        self.check_for(token, AUDIENCE).await
+    }
+
+    /// Checks an ES256 token: its signature by the OpenBao key it names, its issuer, that it's
+    /// for `audience`, and its times.
+    pub async fn check_for(&self, token: &str, audience: &str) -> Result<Checked, String> {
         if token.len() > MAX_TOKEN {
             return Err("not a signed token".into());
         }
@@ -180,8 +188,8 @@ impl TokenChecker {
             return Err("token refused: another issuer's".into());
         }
         let for_us = match &claims.aud {
-            Audience::One(aud) => aud == AUDIENCE,
-            Audience::Many(auds) => auds.iter().any(|a| a == AUDIENCE),
+            Audience::One(aud) => aud == audience,
+            Audience::Many(auds) => auds.iter().any(|a| a == audience),
         };
         if !for_us {
             return Err("token refused: it's for another service".into());
