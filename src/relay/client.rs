@@ -336,6 +336,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_session_ends_a_connection_that_goes_quiet() {
+        let (checker, _) = checker("k1");
+        let mut shared = Shared::new(vec![], None, checker).await.unwrap();
+        shared.quiet_for = Duration::from_secs(1);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(session::serve(listener, Arc::new(shared)));
+        let address = Address::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        // A good token for five minutes, but a PC that says nothing after it.
+        let mut connection = connect(&address, tls(), tokens(300)).await.unwrap();
+        assert!(matches!(
+            next(&mut connection).await,
+            FromSession::Accounts(_)
+        ));
+        let ended = tokio::time::timeout(Duration::from_secs(20), connection.rx.recv())
+            .await
+            .expect("the session ended it in time");
+        assert!(ended.is_none());
+    }
+
+    #[tokio::test]
     async fn the_session_ends_a_connection_whose_token_ran_out() {
         let address = session(vec![]).await;
         // Run out 25 seconds ago: still let in within the grace, which ends 5 seconds from now,

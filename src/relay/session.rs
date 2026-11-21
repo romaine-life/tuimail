@@ -91,7 +91,15 @@ pub(super) struct Served {
 }
 
 /// What every PC's connection shares.
+/// How long a PC may say nothing before its connection is taken as gone: two missed token
+/// renewals and a little. A connection the PC lost without a word (its network dropped) would
+/// otherwise stay until its last token ran out, minutes, its workers holding the account's
+/// connections open for nobody.
+pub const QUIET_FOR: Duration = Duration::from_secs(75);
+
 pub struct Shared {
+    /// How long a PC may say nothing ([`QUIET_FOR`]; shorter in tests).
+    pub quiet_for: Duration,
     pub(super) accounts: HashMap<String, Served>,
     /// The store, where the archive is; none in tests that need no archive.
     vault: Option<Arc<Vault>>,
@@ -145,6 +153,7 @@ impl Shared {
             served.insert(id, Served { creds, endpoints });
         }
         Ok(Self {
+            quiet_for: QUIET_FOR,
             accounts: served,
             snapshots: None,
             vault,
@@ -437,10 +446,11 @@ async fn serve_pc(socket: WebSocket, shared: Arc<Shared>, checked: Checked) {
         tx,
     };
     let mut until = deadline(checked.expires);
+    let mut heard = tokio::time::Instant::now();
     let why = loop {
         tokio::select! {
             message = incoming.next() => match message {
-                Some(Ok(Message::Binary(bytes))) => match decode::<ToSession>(&bytes) {
+                Some(Ok(Message::Binary(bytes))) => match decode::<ToSession>(&bytes).inspect(|_| heard = tokio::time::Instant::now()) {
                     Ok(ToSession::Token(token)) => match shared.checker.check(&token).await {
                         Ok(checked) => until = deadline(checked.expires),
                         Err(_) => break "a PC's new token isn't good",
@@ -460,6 +470,7 @@ async fn serve_pc(socket: WebSocket, shared: Arc<Shared>, checked: Checked) {
                 }
             }
             () = tokio::time::sleep_until(until) => break "a PC's token ran out",
+            () = tokio::time::sleep_until(heard + shared.quiet_for) => break "a PC went quiet",
         }
     };
     logfile::note(why, None);
