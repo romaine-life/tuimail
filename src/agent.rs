@@ -46,6 +46,8 @@ pub const TRASH_PER_HOUR: usize = 100;
 /// the user's connection and bandwidth.
 pub const DOWNLOADS_PER_HOUR: usize = 200;
 pub const DOWNLOAD_BYTES_PER_HOUR: u64 = 512 << 20;
+/// The most attachments agents save in an hour.
+pub const SAVES_PER_HOUR: usize = 50;
 /// The most messages agents unsubscribe from in an hour.
 pub const UNSUBSCRIBES_PER_HOUR: usize = 200;
 /// How long a change waits for the user's `y`.
@@ -78,6 +80,7 @@ pub enum Call {
     Unsubscribe(IdsArgs),
     SearchArchive(ArchiveSearchArgs),
     ReadArchived(ReadArgs),
+    SaveAttachment(SaveArgs),
 }
 
 impl Call {
@@ -144,6 +147,16 @@ pub struct ReadArgs {
     /// 20000).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_chars: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveArgs {
+    /// The message's id, from search_messages or search_archive.
+    pub id: String,
+    /// Which attachment: its `index` in read_message's (or
+    /// read_archived's) `attachments`.
+    pub index: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]

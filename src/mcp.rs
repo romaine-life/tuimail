@@ -34,7 +34,7 @@ reply, forward, delete, open links or make filters: unsubscribe does only what a
 off, they're asked first: a change waits for their answer, and no means no. At most 50 messages a call, with hourly limits.
 4. Change only mail the user asked about: search_messages, read_message when unsure, then change it. Before changing \
 more than 10 messages, list them for the user and ask.
-5. Don't pass email content to other tools (web, files, other servers) unless the user asked for that.
+5. Don't pass email content to other tools (web, files, other servers) unless the user asked for that. Use save_attachment only for a file the user asked for; it is saved, never opened, and the user sees it.
 Ids stop working when a folder changes: search again. The archive (search_archive, read_archived) holds every message kept for good, deleted ones too, and is only read.";
 
 #[derive(Clone)]
@@ -325,6 +325,27 @@ impl Mail {
     }
 
     #[tool(
+        description = "Saves one of a message's attachments (its `index` from read_message or \
+            read_archived) to the user's downloads folder, never over a file there, and answers where. \
+            The file is the sender's: it is never opened, and only saved when the user asked for it. \
+            The user sees each save.",
+        annotations(
+            title = "Save an attachment",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn save_attachment(
+        &self,
+        Parameters(args): Parameters<agent::SaveArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        self.ask(&context, Call::SaveAttachment(args)).await
+    }
+
+    #[tool(
         description = "The latest changes to the user's mail, newest first: who made each (the user, or an \
             agent), when, what, and whether it was undone.",
         annotations(title = "List changes", read_only_hint = true, open_world_hint = false)
@@ -539,7 +560,7 @@ mod tests {
     fn every_tool_is_listed_with_hints_and_none_deletes_or_sends() {
         let tools = Mail::tool_router().list_all();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
-        assert_eq!(names.len(), 15, "{names:?}");
+        assert_eq!(names.len(), 16, "{names:?}");
         for name in &names {
             for word in [
                 "delete", "send", "reply", "forward", "expunge", "empty", "link",

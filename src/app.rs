@@ -86,6 +86,13 @@ pub enum AppEvent {
         n: usize,
         result: Result<(), String>,
     },
+    /// An attachment an agent (`who`) asked for was saved, or wasn't:
+    /// said on the screen, then answered on `reply`.
+    AgentSaved {
+        who: String,
+        result: Result<Saved, String>,
+        reply: tokio::sync::oneshot::Sender<crate::agent::Answer>,
+    },
     /// The SMTP server took the message, or didn't.
     Sent {
         account: String,
@@ -399,9 +406,16 @@ pub struct AgentAsk {
 /// An agent's read waiting for its message to download.
 struct AgentRead {
     key: (usize, String, u32),
-    max: usize,
+    wants: Wants,
     reply: tokio::sync::oneshot::Sender<agent::Answer>,
     at: Instant,
+}
+
+/// What an agent's read is for: the message's text (at most this many
+/// characters), or one of its attachments saved, for the agent named.
+enum Wants {
+    Text(usize),
+    Save { who: String, index: usize },
 }
 
 /// An agent's unsubscribe, let through: answered once every message's
@@ -655,6 +669,8 @@ pub struct App {
     agent_fetched: VecDeque<(Instant, u64)>,
     /// When agents read archived messages, for the hourly limit.
     archive_reads: VecDeque<Instant>,
+    /// When agents saved attachments, for the hourly limit.
+    agent_saves: VecDeque<Instant>,
     /// Agents' changes in the last hour: when, how many messages, how
     /// many to Trash (the hourly limits).
     agent_spent: VecDeque<(Instant, usize, usize)>,
@@ -746,12 +762,65 @@ fn agent_text(raw: &[u8], max: usize, mut out: serde_json::Value) -> agent::Answ
     out["cc"] = serde_json::json!(addresses(&parsed.cc));
     out["reply_to"] = serde_json::json!(addresses(&parsed.reply_to));
     out["subject"] = serde_json::json!(agent::hide_links(&parsed.summary.subject));
-    out["attachments"] = (parsed.attachments.iter())
-        .map(|a| serde_json::json!({ "name": agent::hide_links(&a.name), "size": mail::size(a.size) }))
+    out["attachments"] = (parsed.attachments.iter().enumerate())
+        .map(|(n, a)| {
+            serde_json::json!({
+                "index": n,
+                "name": agent::hide_links(&a.name),
+                "size": mail::size(a.size),
+            })
+        })
         .collect();
     out["text"] = serde_json::json!(text::first_chars(&text, max));
     out["cut"] = serde_json::json!(cut);
     Ok(out)
+}
+
+/// An attachment saved for an agent: where, under the name it was
+/// listed by, and how big.
+#[derive(Debug)]
+pub struct Saved {
+    path: PathBuf,
+    name: String,
+    size: usize,
+}
+
+/// Saves the `index`th attachment of `raw` (as `agent_text` lists them)
+/// into `dir`, never over a file already there, on a big-stack thread
+/// (`mail::parse` reads the whole message), and says how it went as
+/// `AppEvent::AgentSaved`.
+fn save_for_agent(
+    raw: Vec<u8>,
+    index: usize,
+    dir: PathBuf,
+    who: String,
+    reply: tokio::sync::oneshot::Sender<agent::Answer>,
+    tx: UnboundedSender<AppEvent>,
+) {
+    let job = move || -> Result<Saved, String> {
+        let parsed = mail::parse(&raw).ok_or("This message couldn't be read")?;
+        let listed = parsed.attachments.get(index).ok_or_else(|| {
+            format!(
+                "This message has {} attachments: index is one of read_message's `attachments`",
+                parsed.attachments.len()
+            )
+        })?;
+        let (name, bytes) =
+            mail::attachment(&raw, listed.index).ok_or("That attachment can't be read")?;
+        if name != listed.name {
+            return Err("That attachment can't be read".into());
+        }
+        let path = tools::save_new(&dir, &name, &bytes).map_err(|e| format!("{e:#}"))?;
+        Ok(Saved {
+            path,
+            name,
+            size: bytes.len(),
+        })
+    };
+    mail::in_background(job, move |result| {
+        let result = result.unwrap_or_else(|| Err("That attachment can't be read".into()));
+        let _ = tx.send(AppEvent::AgentSaved { who, result, reply });
+    });
 }
 
 impl App {
@@ -849,6 +918,7 @@ impl App {
             agent_downloads: HashMap::new(),
             agent_fetched: VecDeque::new(),
             archive_reads: VecDeque::new(),
+            agent_saves: VecDeque::new(),
             agent_spent: VecDeque::new(),
             agent_unsubscribes: HashMap::new(),
             next_unsubscribe: 0,
@@ -1343,6 +1413,24 @@ impl App {
                 Ok(path) => self.info(format!("Saved {}", crate::config::shown(&path))),
                 Err(e) => self.error(e),
             },
+            AppEvent::AgentSaved { who, result, reply } => {
+                let answer = result.map(|saved| {
+                    let shown = crate::config::shown(&saved.path);
+                    self.notifier.add(notify::Note {
+                        account: String::new(),
+                        // Not to pass for a sender's mail.
+                        from: format!("AI agent {who}"),
+                        subject: format!("saved {shown}"),
+                    });
+                    self.info(format!("{who} saved {shown}"));
+                    serde_json::json!({
+                        "saved": saved.path.to_string_lossy(),
+                        "name": agent::hide_links(&saved.name),
+                        "size": mail::size(saved.size),
+                    })
+                });
+                let _ = reply.send(answer);
+            }
             AppEvent::Previews { account, previews } => {
                 let Some(i) = self.account_index(&account) else {
                     return;
@@ -1515,7 +1603,14 @@ impl App {
                     Ok(Some(raw)) => {
                         stored("save_body", self.store.save_body(&id, &folder, uid, &raw));
                         for read in self.agent_reads_for(&key) {
-                            self.agent_render(read.key, raw.clone(), read.max, read.reply);
+                            match read.wants {
+                                Wants::Text(max) => {
+                                    self.agent_render(read.key, raw.clone(), max, read.reply)
+                                }
+                                Wants::Save { who, index } => {
+                                    self.agent_save_raw(raw.clone(), index, who, read.reply)
+                                }
+                            }
                         }
                         self.unsubscribe_downloaded(&key, Ok(&raw));
                         let raw = Arc::new(raw);
@@ -3211,6 +3306,7 @@ impl App {
             Call::ReadMessage(args) => return self.agent_read(args, reply),
             Call::SearchArchive(args) => return self.agent_search_archive(args, reply),
             Call::ReadArchived(args) => return self.agent_read_archived(args, reply),
+            Call::SaveAttachment(args) => return self.agent_save(who, args, reply),
             _ => Err("That isn't something tuimail does".into()),
         };
         let _ = reply.send(answer);
@@ -4238,12 +4334,106 @@ impl App {
                 }
                 Ok(()) => self.agent_reads.push(AgentRead {
                     key,
-                    max,
+                    wants: Wants::Text(max),
                     reply,
                     at: Instant::now(),
                 }),
             },
         }
+    }
+
+    /// Saves an attachment for an agent into the downloads folder, as `s`
+    /// does: from a message here (downloaded first if it isn't), or from
+    /// the archive. Not a change to mail, so not asked about; said on the
+    /// screen and in a notification once it's saved.
+    fn agent_save(
+        &mut self,
+        who: String,
+        args: agent::SaveArgs,
+        reply: tokio::sync::oneshot::Sender<agent::Answer>,
+    ) {
+        if self.demo {
+            let _ = reply.send(Err("The demo's files are made up: nothing is saved".into()));
+            return;
+        }
+        let Some(dir) = self.settings.downloads() else {
+            let _ = reply.send(Err("tuimail has no downloads folder to save in".into()));
+            return;
+        };
+        let hour = Duration::from_secs(3600);
+        self.agent_saves.retain(|at| at.elapsed() < hour);
+        if self.agent_saves.len() >= agent::SAVES_PER_HOUR {
+            let _ = reply.send(Err(
+                "Agents have saved as many attachments as they may this hour".into(),
+            ));
+            return;
+        }
+        if let Some(n) = agent::archived_number(&args.id) {
+            let Some(link) = &self.link else {
+                let _ = reply.send(Err(NO_ARCHIVE.into()));
+                return;
+            };
+            self.agent_saves.push_back(Instant::now());
+            let reading = link.read_archived(n);
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                match reading.await {
+                    Ok(Some(raw)) => save_for_agent(raw, args.index, dir, who, reply, tx),
+                    Ok(None) => {
+                        let _ = reply.send(Err("The archive has no such message".into()));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
+                }
+            });
+            return;
+        }
+        let Some(key) = self.agent_key(&args.id) else {
+            let _ = reply.send(Err(
+                "That isn't a message tuimail has now (it moved, or its folder changed): \
+                 search again"
+                    .into(),
+            ));
+            return;
+        };
+        self.agent_saves.push_back(Instant::now());
+        let id = self.accounts[key.0].id.clone();
+        match self.store.body(&id, &key.1, key.2) {
+            Ok(Some(raw)) => save_for_agent(raw, args.index, dir, who, reply, self.tx.clone()),
+            _ if self.accounts[key.0].is_pop() => {
+                let _ = reply.send(Err("This message isn't on this computer".into()));
+            }
+            _ => match self.agent_download(&key) {
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                }
+                Ok(()) => self.agent_reads.push(AgentRead {
+                    key,
+                    wants: Wants::Save {
+                        who,
+                        index: args.index,
+                    },
+                    reply,
+                    at: Instant::now(),
+                }),
+            },
+        }
+    }
+
+    /// Saves attachment `index` of a message just downloaded, for an agent.
+    fn agent_save_raw(
+        &self,
+        raw: Vec<u8>,
+        index: usize,
+        who: String,
+        reply: tokio::sync::oneshot::Sender<agent::Answer>,
+    ) {
+        let Some(dir) = self.settings.downloads() else {
+            let _ = reply.send(Err("tuimail has no downloads folder to save in".into()));
+            return;
+        };
+        save_for_agent(raw, index, dir, who, reply, self.tx.clone());
     }
 
     /// Downloads a message for agents: once, joined by every read or
@@ -8604,6 +8794,91 @@ pub mod tests {
         assert!(refused.try_recv().unwrap().is_err());
         assert_eq!(downloads(&app), 1);
         drop(waiting);
+    }
+
+    /// An agent saves an attachment by the index read_message lists it
+    /// under: into the downloads folder, never over a file there, said on
+    /// the screen; a wrong index or the demo saves nothing.
+    #[tokio::test]
+    async fn agents_save_an_attachment_read_message_lists() {
+        let mut app = app();
+        with_mail(&mut app);
+        let id = app.accounts[0].id.clone();
+        let raw = "From: a@b.c\r\nSubject: The package\r\nMessage-ID: <p@b.c>\r\n\
+            MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
+            --b\r\nContent-Type: text/plain\r\n\r\nHere it is\r\n\
+            --b\r\nContent-Type: application/zip\r\n\
+            Content-Disposition: attachment; filename=\"pkg.zip\"\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\nUEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==\r\n--b--\r\n";
+        let header = crate::store::Header {
+            uid: 77002,
+            summary: mail::summarize(raw.as_bytes()),
+            flags: Flags::default(),
+            size: raw.len() as u32,
+        };
+        app.store.add_headers(&id, "INBOX", &[header]).unwrap();
+        app.store
+            .save_body(&id, "INBOX", 77002, raw.as_bytes())
+            .unwrap();
+        let handle = app.agent_id(0, "INBOX", 77002);
+        let save = |app: &mut App, index| {
+            agent_call(
+                app,
+                Call::SaveAttachment(agent::SaveArgs {
+                    id: handle.clone(),
+                    index,
+                }),
+            )
+        };
+        let demo = agent_now(
+            &mut app,
+            Call::SaveAttachment(agent::SaveArgs {
+                id: handle.clone(),
+                index: 0,
+            }),
+        );
+        assert!(demo.unwrap_err().contains("demo"));
+
+        app.demo = false;
+        let dir = crate::tools::private_temp_dir().unwrap();
+        app.settings.downloads = Some(dir.clone());
+        let mut read = agent_call(
+            &mut app,
+            Call::ReadMessage(agent::ReadArgs {
+                id: handle.clone(),
+                max_chars: None,
+            }),
+        );
+        app.wait_until(|_| !read.is_empty()).await;
+        let listed = read.try_recv().unwrap().unwrap();
+        assert_eq!(listed["attachments"][0]["index"], 0);
+        assert_eq!(listed["attachments"][0]["name"], "pkg.zip");
+
+        for expected in ["pkg.zip", "pkg (1).zip"] {
+            let mut saved = save(&mut app, 0);
+            app.wait_until(|_| !saved.is_empty()).await;
+            let saved = saved.try_recv().unwrap().unwrap();
+            let path = PathBuf::from(saved["saved"].as_str().unwrap());
+            assert_eq!(path, dir.join(expected));
+            assert_eq!(std::fs::read(&path).unwrap().len(), 22);
+            let shown = app
+                .status
+                .as_ref()
+                .map(|s| s.text.clone())
+                .unwrap_or_default();
+            assert!(shown.contains("saved"), "{shown}");
+        }
+        let mut wrong = save(&mut app, 1);
+        app.wait_until(|_| !wrong.is_empty()).await;
+        assert!(
+            wrong
+                .try_recv()
+                .unwrap()
+                .unwrap_err()
+                .contains("1 attachments")
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A list's message in the first account's inbox, its text kept here
