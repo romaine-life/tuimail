@@ -1237,9 +1237,10 @@ mod tests {
                 "worker::tests::a_refused_login_reaches_the_log_as_a_number_and_a_class",
             );
             assert!(run.status.success(), "{run:?}");
-            let said = "failed op=\"logging in\" account=2 class=login-refused \
+            let said = "error failed op=\"logging in\" account=2 class=login-refused \
                         code=AUTHENTICATIONFAILED";
             assert!(log.contains(said), "{log}");
+            crate::logfile::tests::events(&log);
             assert_nothing_private_in(&log);
             return;
         };

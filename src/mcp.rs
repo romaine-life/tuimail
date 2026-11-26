@@ -429,12 +429,8 @@ pub async fn run(data_dir: PathBuf, demo: bool) -> Result<()> {
 mod tests {
     use super::*;
     use crate::logfile::tests::{
-        assert_nothing_private_in, child_dir, log_of_child, private_words,
+        assert_nothing_private_in, child_dir, events, log_of_child, private_words,
     };
-
-    fn events(log: &str) -> Vec<&str> {
-        log.lines().map(|l| l.split_once(' ').unwrap().1).collect()
-    }
 
     /// No tuimail to ask: the agent gets the reason each time, and the log
     /// gets it once, without who asked or what about.
@@ -447,7 +443,7 @@ mod tests {
             assert!(run.status.success(), "{run:?}");
             assert_eq!(
                 events(&log),
-                ["failed op=\"asking tuimail\" class=agent kind=not-listening"],
+                ["error failed op=\"asking tuimail\" class=agent kind=not-listening"],
                 "{log}"
             );
             assert_nothing_private_in(&log);
@@ -475,7 +471,10 @@ mod tests {
             assert!(run.status.success(), "{run:?}");
             assert_eq!(
                 events(&log),
-                ["failed op=\"asking tuimail\" class=protocol", "recovered"],
+                [
+                    "error failed op=\"asking tuimail\" class=protocol",
+                    "info recovered"
+                ],
                 "{log}"
             );
             return;
@@ -509,7 +508,7 @@ mod tests {
             assert!(run.status.success(), "{run:?}");
             assert_eq!(
                 events(&log),
-                ["failed op=\"serving an agent\" class=connection-lost"],
+                ["error failed op=\"serving an agent\" class=connection-lost"],
                 "{log}"
             );
             return;
@@ -533,7 +532,10 @@ mod tests {
         let (run, log) =
             log_of_child("mcp::tests::a_crash_says_where_and_leaves_stdout_to_the_agent");
         assert_eq!(run.status.code(), Some(101), "{run:?}");
-        assert!(events(&log)[0].starts_with("crash at=src/mcp.rs"), "{log}");
+        assert!(
+            events(&log)[0].starts_with("error crash at=src/mcp.rs"),
+            "{log}"
+        );
         assert_nothing_private_in(&log);
         assert!(!run.stdout.contains(&0x1b), "{run:?}");
     }

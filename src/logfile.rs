@@ -6,6 +6,13 @@
 //! static words and numbers. An account is its place in `accounts.toml`,
 //! since its name can be its address.
 //!
+//! Each line is the house's one log line (logline, AHT-204): the time with
+//! milliseconds and its zone, the pid, `info`, `warn` or `error`, the event
+//! as the message (`start`, `failed`, ...), then its fields (`op`, `account`,
+//! `class`, ...). Fields are [`Value`]s, which hold only static words and
+//! numbers. logline writes the file, closing it after each line, and moves
+//! it to [`OLD_FILE`] past 1 MiB.
+//!
 //! Nothing is written until [`open`] or [`join`], which the demos and tests
 //! don't call.
 
@@ -13,20 +20,22 @@ use std::error::Error;
 use std::fmt;
 use std::io::{ErrorKind, Write};
 use std::panic::Location;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
 
-use chrono::{Local, SecondsFormat};
+use chrono::Local;
+use logline::Level;
 use rmcp::service::ServerInitializeError;
 
 use crate::{imap, oauth, pop3, secrets, smtp};
 
 pub const FILE: &str = "tuimail.log";
+/// Where logline moves [`FILE`] past 1 MiB (`logline::LIMIT`); the data
+/// folder's check knows it by name (`config::make_private_dir`, Unix only).
+#[cfg_attr(not(unix), allow(dead_code))]
 pub const OLD_FILE: &str = "tuimail.log.old";
-/// Past this it's moved to [`OLD_FILE`], and a new one begun.
-const MAX_SIZE: u64 = 1 << 20;
 
-static LOG: OnceLock<PathBuf> = OnceLock::new();
+static LOG: OnceLock<logline::Logger> = OnceLock::new();
 /// The session (`tuimail session`) writes its lines to stdout instead, where its pod's log is
 /// shipped to the house's log pile; the same words, so the same privacy.
 static TO_STDOUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -75,30 +84,58 @@ impl Class {
     }
 }
 
-impl fmt::Display for Class {
+impl Class {
+    /// The class's fields on a line: `class`, then its kind, code or number.
+    fn fields(self) -> Vec<(&'static str, Value)> {
+        use Value::{Kind, Number, Word};
+        let (class, detail) = match self {
+            Class::Timeout => ("timeout", None),
+            Class::ConnectionLost => ("connection-lost", None),
+            Class::Io(kind, os) => {
+                let mut fields = vec![("class", Word("io")), ("kind", Kind(kind))];
+                fields.extend(os.map(|os| ("os", Number(os.into()))));
+                return fields;
+            }
+            Class::Tls(kind) => ("tls", Some(("kind", Word(kind)))),
+            Class::LoginRefused(code) => ("login-refused", code.map(|c| ("code", Word(c)))),
+            Class::NeedPassword => ("need-password", None),
+            Class::SignInAgain => ("sign-in-again", None),
+            Class::SignInRefused(code) => ("sign-in-refused", Some(("code", Word(code)))),
+            Class::Http(status) => ("http", Some(("status", Number(status.into())))),
+            Class::ServerRefused(code) => ("server-refused", code.map(|c| ("code", Word(c)))),
+            Class::Smtp(code) => ("smtp", Some(("code", Number(code.into())))),
+            Class::Protocol => ("protocol", None),
+            Class::Agent(kind) => ("agent", Some(("kind", Word(kind)))),
+            Class::Keychain => ("keychain", None),
+            Class::Palette(kind) => ("palette", Some(("kind", Word(kind)))),
+            Class::Store(code) => ("store", code.map(|c| ("sqlite", Number(c.into())))),
+            Class::Other => ("other", None),
+        };
+        let mut fields = vec![("class", Word(class))];
+        fields.extend(detail);
+        fields
+    }
+}
+
+/// A field's value: a static word, a number, an I/O error's kind or a
+/// source location. Never text from outside, so never a `String` a caller
+/// hands in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Value {
+    Word(&'static str),
+    Number(i64),
+    Kind(ErrorKind),
+    /// A panic's place, `src/app.rs:12:5` ([`source_file`]).
+    At(String, u32, u32),
+}
+
+impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Class::Timeout => f.write_str("class=timeout"),
-            Class::ConnectionLost => f.write_str("class=connection-lost"),
-            Class::Io(kind, None) => write!(f, "class=io kind={kind:?}"),
-            Class::Io(kind, Some(os)) => write!(f, "class=io kind={kind:?} os={os}"),
-            Class::Tls(kind) => write!(f, "class=tls kind={kind}"),
-            Class::LoginRefused(None) => f.write_str("class=login-refused"),
-            Class::LoginRefused(Some(code)) => write!(f, "class=login-refused code={code}"),
-            Class::NeedPassword => f.write_str("class=need-password"),
-            Class::SignInAgain => f.write_str("class=sign-in-again"),
-            Class::SignInRefused(code) => write!(f, "class=sign-in-refused code={code}"),
-            Class::Http(status) => write!(f, "class=http status={status}"),
-            Class::ServerRefused(None) => f.write_str("class=server-refused"),
-            Class::ServerRefused(Some(code)) => write!(f, "class=server-refused code={code}"),
-            Class::Smtp(code) => write!(f, "class=smtp code={code}"),
-            Class::Protocol => f.write_str("class=protocol"),
-            Class::Agent(kind) => write!(f, "class=agent kind={kind}"),
-            Class::Keychain => f.write_str("class=keychain"),
-            Class::Palette(kind) => write!(f, "class=palette kind={kind}"),
-            Class::Store(None) => f.write_str("class=store"),
-            Class::Store(Some(code)) => write!(f, "class=store sqlite={code}"),
-            Class::Other => f.write_str("class=other"),
+            Value::Word(word) => f.write_str(word),
+            Value::Number(n) => write!(f, "{n}"),
+            Value::Kind(kind) => write!(f, "{kind:?}"),
+            Value::At(file, line, column) => write!(f, "{file}:{line}:{column}"),
         }
     }
 }
@@ -232,12 +269,19 @@ pub fn class_of(error: &anyhow::Error) -> Class {
     error.chain().find_map(class_of_one).unwrap_or(Class::Other)
 }
 
-/// The line for a failure of `op`, without its time.
-fn failure(op: &'static str, account: Option<usize>, class: Class) -> String {
-    match account {
-        Some(account) => format!("failed op=\"{op}\" account={account} {class}"),
-        None => format!("failed op=\"{op}\" {class}"),
-    }
+type Fields = Vec<(&'static str, Value)>;
+
+/// The fields of a failure of `op`: the op, the account, the class.
+fn failure(op: &'static str, account: Option<usize>, class: Class) -> Fields {
+    let mut fields = vec![("op", Value::Word(op))];
+    fields.extend(numbered(account));
+    fields.extend(class.fields());
+    fields
+}
+
+/// `account=<n>`, when there is one.
+fn numbered(account: Option<usize>) -> Option<(&'static str, Value)> {
+    account.map(|n| ("account", Value::Number(n as i64)))
 }
 
 /// A source file as a panic names it, `src/app.rs` or, in a dependency,
@@ -264,39 +308,48 @@ fn adding() -> std::fs::OpenOptions {
     options
 }
 
-/// Adds `text` as one line, with the time and its zone, and closes the
-/// file, which is what tells whoever's watching it.
-fn append(path: &Path, text: &str) -> std::io::Result<()> {
-    if std::fs::metadata(path).is_ok_and(|meta| meta.len() > MAX_SIZE) {
-        // Another tuimail may have got here first, or be writing.
-        let _ = std::fs::rename(path, path.with_file_name(OLD_FILE));
-    }
-    let now = Local::now().to_rfc3339_opts(SecondsFormat::Millis, false);
-    adding()
-        .open(path)?
-        .write_all(format!("{now} {text}\n").as_bytes())
-}
-
-fn write(text: &str) {
+/// Writes one line: to stdout for the session, else to the log once it's
+/// opened, else nowhere.
+fn write(level: Level, event: &'static str, fields: &[(&'static str, Value)]) {
+    let fields: Vec<(&str, &dyn fmt::Display)> = fields
+        .iter()
+        .map(|(key, value)| (*key, value as &dyn fmt::Display))
+        .collect();
     if TO_STDOUT.load(std::sync::atomic::Ordering::Relaxed) {
-        let now = Local::now().to_rfc3339_opts(SecondsFormat::Millis, false);
+        let now = Local::now().fixed_offset();
+        let line = logline::format(now, std::process::id(), level, event, &fields);
         let mut out = std::io::stdout().lock();
-        let _ = writeln!(out, "{now} {text}");
+        let _ = writeln!(out, "{line}");
         let _ = out.flush();
         return;
     }
-    if let Some(path) = LOG.get() {
-        let _ = append(path, text);
+    if let Some(log) = LOG.get() {
+        log.log(level, event, &fields);
     }
+}
+
+/// Makes the log in `data_dir` if it's not there (on Unix 0600, never
+/// through a link) and has logline add to it from now on. An error means it
+/// can't be written.
+fn start(data_dir: &Path) -> std::io::Result<()> {
+    let path = data_dir.join(FILE);
+    adding().open(&path)?;
+    let _ = LOG.set(logline::Logger::open_file(path));
+    Ok(())
 }
 
 /// Starts the log in `data_dir`, saying so. An error means it can't be
 /// written, which the app says on the screen.
 pub fn open(data_dir: &Path, accounts: usize) -> std::io::Result<()> {
-    let path = data_dir.join(FILE);
-    let start = format!("start version={} accounts={accounts}", crate::info::VERSION);
-    append(&path, &start)?;
-    let _ = LOG.set(path);
+    start(data_dir)?;
+    write(
+        Level::Info,
+        "start",
+        &[
+            ("version", Value::Word(crate::info::VERSION)),
+            ("accounts", Value::Number(accounts as i64)),
+        ],
+    );
     Ok(())
 }
 
@@ -304,44 +357,60 @@ pub fn open(data_dir: &Path, accounts: usize) -> std::io::Result<()> {
 /// agent starts for each session, so that its coming and going would be most
 /// of the log. An error means it can't be written.
 pub fn join(data_dir: &Path) -> std::io::Result<()> {
-    let path = data_dir.join(FILE);
-    adding().open(&path)?;
-    let _ = LOG.set(path);
-    Ok(())
+    start(data_dir)
 }
 
 /// Starts the log on stdout, saying so: for the session, whose pod's output is its log.
 pub fn to_stdout(accounts: usize) {
     TO_STDOUT.store(true, std::sync::atomic::Ordering::Relaxed);
-    write(&format!(
-        "start session version={} accounts={accounts}",
-        crate::info::VERSION
-    ));
+    write(
+        Level::Info,
+        "start",
+        &[
+            ("mode", Value::Word("session")),
+            ("version", Value::Word(crate::info::VERSION)),
+            ("accounts", Value::Number(accounts as i64)),
+        ],
+    );
 }
 
-/// Writes a line of static words and numbers: the session's own events (a PC connected or
-/// was refused), which have no error to sort.
+/// Writes an event of static words, and its account if it has one: the session's own
+/// (a PC connected, left), which have no error to sort.
 pub fn note(text: &'static str, number: Option<usize>) {
-    match number {
-        Some(n) => write(&format!("{text} account={n}")),
-        None => write(text),
-    }
+    write(Level::Info, text, &Vec::from_iter(numbered(number)));
+}
+
+/// [`note`] at `warn`: something refused or left out.
+pub fn warning(text: &'static str, number: Option<usize>) {
+    write(Level::Warn, text, &Vec::from_iter(numbered(number)));
 }
 
 /// Writes what an account's archive pass did: messages kept, places noted, places gone.
 pub fn counted(text: &'static str, number: usize, kept: usize, placed: usize, gone: usize) {
-    write(&format!(
-        "{text} account={number} kept={kept} placed={placed} gone={gone}"
-    ));
+    let count = |n: usize| Value::Number(n as i64);
+    write(
+        Level::Info,
+        text,
+        &[
+            ("account", count(number)),
+            ("kept", count(kept)),
+            ("placed", count(placed)),
+            ("gone", count(gone)),
+        ],
+    );
 }
 
 pub fn stopped() {
-    write("stop");
+    write(Level::Info, "stop", &[]);
 }
 
 /// Writes that `op` failed. Only `error`'s class is taken from it.
 pub fn failed(op: &'static str, account: Option<usize>, error: &anyhow::Error) {
-    write(&failure(op, account, class_of(error)));
+    write(
+        Level::Error,
+        "failed",
+        &failure(op, account, class_of(error)),
+    );
 }
 
 /// [`failed`] for what a store write gave, which the app goes on from.
@@ -359,15 +428,11 @@ pub fn panicked(location: Option<&Location>, contained: bool) {
     } else {
         "crash"
     };
-    match location {
-        Some(at) => write(&format!(
-            "{event} at={}:{}:{}",
-            source_file(at.file()),
-            at.line(),
-            at.column()
-        )),
-        None => write(event),
-    }
+    let at = location.map(|at| {
+        let place = Value::At(source_file(at.file()), at.line(), at.column());
+        ("at", place)
+    });
+    write(Level::Error, event, &Vec::from_iter(at));
 }
 
 /// One connection, and its account if it has one: a failure that keeps
@@ -398,16 +463,17 @@ impl Link {
         let class = class_of(error);
         if self.down != Some(class) {
             self.down = Some(class);
-            write(&failure(op, self.account, class));
+            write(Level::Error, "failed", &failure(op, self.account, class));
         }
     }
 
     pub fn back(&mut self) {
         if self.down.take().is_some() {
-            match self.account {
-                Some(account) => write(&format!("recovered account={account}")),
-                None => write("recovered"),
-            }
+            write(
+                Level::Info,
+                "recovered",
+                &Vec::from_iter(numbered(self.account)),
+            );
         }
     }
 }
@@ -417,6 +483,7 @@ pub mod tests {
     use super::*;
     use crate::{mail, tools};
     use anyhow::anyhow;
+    use std::path::PathBuf;
 
     /// Everything that must stay out of the log, all in one error text.
     pub const PRIVATE: &[&str] = &[
@@ -431,6 +498,25 @@ pub mod tests {
         PRIVATE.join(" ")
     }
 
+    /// The line `write` would make for an error event, checked to read back
+    /// as the standard line.
+    fn rendered(event: &'static str, fields: &[(&'static str, Value)]) -> String {
+        let fields: Vec<(&str, &dyn fmt::Display)> = fields
+            .iter()
+            .map(|(key, value)| (*key, value as &dyn fmt::Display))
+            .collect();
+        let now = Local::now().fixed_offset();
+        let line = logline::format(now, 1, Level::Error, event, &fields);
+        logline::parse(&line).unwrap_or_else(|e| panic!("{e}: {line}"));
+        line
+    }
+
+    /// A log's lines from their level on (`error failed op=...`), each
+    /// checked to be the standard line.
+    pub fn events(log: &str) -> Vec<&str> {
+        events_of(&log.lines().collect::<Vec<_>>())
+    }
+
     /// `error`'s text holds the private words, and its log line none.
     pub fn assert_kept_out(error: &anyhow::Error, class: Class) {
         let text = format!("{error:#}");
@@ -439,7 +525,10 @@ pub mod tests {
             "the test's error has nothing private in it: {text}"
         );
         assert_eq!(class_of(error), class, "{text}");
-        let line = failure("checking for mail", Some(1), class_of(error));
+        let line = rendered(
+            "failed",
+            &failure("checking for mail", Some(1), class_of(error)),
+        );
         for word in PRIVATE {
             assert!(!line.contains(word), "{word} is in {line}");
         }
@@ -551,37 +640,120 @@ pub mod tests {
     }
 
     #[test]
-    fn each_line_starts_with_its_time_and_zone_and_ends_written() {
-        let path = folder().join(FILE);
-        append(&path, "one").unwrap();
-        append(&path, "two").unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        let lines: Vec<_> = text.lines().collect();
-        assert_eq!(lines.len(), 2, "{text}");
-        assert!(text.ends_with('\n'));
-        for (line, words) in lines.iter().zip(["one", "two"]) {
-            let (time, rest) = line.split_once(' ').unwrap();
-            chrono::DateTime::parse_from_rfc3339(time).unwrap();
-            assert_eq!(rest, words);
+    fn each_event_is_a_standard_line_with_its_level_and_fields() {
+        if let Some(dir) = child_dir() {
+            open(&dir, 2).unwrap();
+            failed("logging in", Some(2), &anyhow!(Class::Smtp(535).with("x")));
+            let mut link = Link::new(3);
+            link.failed("checking for mail", &anyhow!(Class::Timeout.with("x")));
+            link.back();
+            warning("left out: the account isn't usable", Some(1));
+            counted("archived", 1, 4, 5, 0);
+            failed(
+                "reading",
+                None,
+                &anyhow!(std::io::Error::from_raw_os_error(5)),
+            );
+            stopped();
+            return;
         }
+        let (run, log) =
+            log_of_child("logfile::tests::each_event_is_a_standard_line_with_its_level_and_fields");
+        assert!(run.status.success(), "{run:?}");
+        let events = events(&log);
+        let start = format!("info start version={} accounts=2", crate::info::VERSION);
+        assert_eq!(events[0], start, "{log}");
+        assert_eq!(
+            events[1..events.len() - 2],
+            [
+                "error failed op=\"logging in\" account=2 class=smtp code=535",
+                "error failed op=\"checking for mail\" account=3 class=timeout",
+                "info recovered account=3",
+                "warn left out: the account isn't usable account=1",
+                "info archived account=1 kept=4 placed=5 gone=0",
+            ],
+            "{log}"
+        );
+        let io = events[events.len() - 2];
+        assert!(
+            io.starts_with("error failed op=reading class=io kind="),
+            "{log}"
+        );
+        assert_eq!(events[events.len() - 1], "info stop", "{log}");
     }
 
+    /// logline moves a full log to [`OLD_FILE`], which the data folder's
+    /// check (`config::make_private_dir`) knows by name.
     #[test]
     fn a_full_log_rolls_and_the_new_one_starts_small() {
-        let dir = folder();
-        let path = dir.join(FILE);
-        std::fs::write(&path, vec![b'x'; MAX_SIZE as usize + 1]).unwrap();
-        append(&path, "after").unwrap();
-        assert!(std::fs::metadata(&path).unwrap().len() < 100);
-        let old = std::fs::metadata(dir.join(OLD_FILE)).unwrap();
-        assert_eq!(old.len(), MAX_SIZE + 1);
+        if let Some(dir) = child_dir() {
+            let path = dir.join(FILE);
+            std::fs::write(&path, vec![b'x'; logline::LIMIT as usize + 1]).unwrap();
+            open(&dir, 1).unwrap();
+            assert!(std::fs::metadata(&path).unwrap().len() < 200);
+            let old = std::fs::metadata(dir.join(OLD_FILE)).unwrap();
+            assert_eq!(old.len(), logline::LIMIT + 1);
+            return;
+        }
+        let (run, log) =
+            log_of_child("logfile::tests::a_full_log_rolls_and_the_new_one_starts_small");
+        assert!(run.status.success(), "{run:?}");
+        assert_eq!(events(&log).len(), 1, "{log}");
+    }
+
+    /// The session's log is its stdout: the same lines.
+    #[test]
+    fn the_session_logs_standard_lines_to_stdout() {
+        if child_dir().is_some() {
+            to_stdout(2);
+            note("a PC connected", None);
+            warning("refused a PC: its token isn't good", None);
+            failed("making a snapshot", None, &anyhow!(private_words()));
+            return;
+        }
+        let (run, _) = log_of_child("logfile::tests::the_session_logs_standard_lines_to_stdout");
+        assert!(run.status.success(), "{run:?}");
+        let out = String::from_utf8_lossy(&run.stdout);
+        // The test harness's words share the lines; the log's start at its time.
+        let lines: Vec<_> = out
+            .lines()
+            .filter(|line| line.contains(" pid="))
+            .map(|line| &line[line.find(|c: char| c.is_ascii_digit()).unwrap()..])
+            .collect();
+        let events = events_of(&lines);
+        let start = format!(
+            "info start mode=session version={} accounts=2",
+            crate::info::VERSION
+        );
+        assert_eq!(
+            events,
+            [
+                start.as_str(),
+                "info a PC connected",
+                "warn refused a PC: its token isn't good",
+                "error failed op=\"making a snapshot\" class=other",
+            ],
+            "{out}"
+        );
+        assert_nothing_private_in(&out);
+    }
+
+    fn events_of<'a>(lines: &[&'a str]) -> Vec<&'a str> {
+        lines
+            .iter()
+            .map(|line| {
+                logline::parse(line).unwrap_or_else(|e| panic!("{e}: {line}"));
+                line.splitn(3, ' ').nth(2).unwrap()
+            })
+            .collect()
     }
 
     #[test]
     fn a_repeating_failure_is_written_once_until_it_changes_or_ends() {
+        let line = rendered("failed", &failure("logging in", Some(2), Class::Timeout));
         assert_eq!(
-            failure("logging in", Some(2), Class::Timeout),
-            "failed op=\"logging in\" account=2 class=timeout"
+            events(&line),
+            ["error failed op=\"logging in\" account=2 class=timeout"]
         );
         let mut link = Link::new(2);
         let timeout = anyhow!(Class::Timeout.with("x"));
@@ -605,8 +777,7 @@ pub mod tests {
         let (run, log) =
             log_of_child("logfile::tests::joining_says_nothing_and_later_lines_are_written");
         assert!(run.status.success(), "{run:?}");
-        let events: Vec<_> = log.lines().map(|l| l.split_once(' ').unwrap().1).collect();
-        assert_eq!(events, ["failed op=\"x\" class=other"], "{log}");
+        assert_eq!(events(&log), ["error failed op=x class=other"], "{log}");
     }
 
     #[test]
@@ -657,11 +828,15 @@ pub mod tests {
         assert_eq!(run.status.code(), Some(101), "{run:?}");
         let screen = String::from_utf8_lossy(&run.stderr);
         assert!(screen.contains("Merger talks"), "not quoted: {screen}");
-        let events: Vec<_> = log
-            .lines()
-            .filter_map(|line| line.split(' ').nth(1))
+        let events: Vec<_> = events(&log)
+            .iter()
+            .map(|event| event.split(' ').take(2).collect::<Vec<_>>().join(" "))
             .collect();
-        assert_eq!(events, ["start", "contained-panic", "crash"], "{log}");
+        assert_eq!(
+            events,
+            ["info start", "error contained-panic", "error crash"],
+            "{log}"
+        );
         assert!(log.contains("at=src"), "{log}");
         assert_nothing_private_in(&log);
     }

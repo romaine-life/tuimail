@@ -124,7 +124,7 @@ impl Shared {
         for (i, account) in accounts.into_iter().enumerate() {
             let number = i + 1;
             if account.problem().is_some() {
-                logfile::note("left out: the account isn't usable", Some(number));
+                logfile::warning("left out: the account isn't usable", Some(number));
                 continue;
             }
             let tls = match net::tls_config(account.certificate.as_deref()) {
@@ -250,7 +250,7 @@ async fn upgrade(
             .max_frame_size(MAX_MESSAGE)
             .on_upgrade(move |socket| serve_pc(socket, shared, checked)),
         Err(_) => {
-            logfile::note("refused a PC: its token isn't good", None);
+            logfile::warning("refused a PC: its token isn't good", None);
             (StatusCode::UNAUTHORIZED, "token refused").into_response()
         }
     }
@@ -270,7 +270,7 @@ async fn backup(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Respon
     {
         Ok(checked) if checked.device == BACKUP_DEVICE => {}
         _ => {
-            logfile::note("refused a backup: its token isn't the NAS's", None);
+            logfile::warning("refused a backup: its token isn't the NAS's", None);
             return (StatusCode::UNAUTHORIZED, "token refused").into_response();
         }
     }

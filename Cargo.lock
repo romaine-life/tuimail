@@ -1691,6 +1691,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "logline"
+version = "0.1.0"
+source = "git+https://forgejo.romaine.life/romaine-life/logline?tag=v0.1.0#9ba8d7791673466f0a171d965bef6347618bb8b4"
+dependencies = [
+ "chrono",
+]
+
+[[package]]
 name = "lru"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3654,6 +3662,7 @@ dependencies = [
  "keyring-core",
  "libc",
  "libloading",
+ "logline",
  "mail-builder",
  "mail-parser",
  "open",
