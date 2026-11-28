@@ -98,6 +98,13 @@ async fn run() -> Result<()> {
         ),
     }
 
+    // One mail app at a time (FP-17): a second one, opened outside the at
+    // menu, says "tuimail is already open" and exits 1 before it reads or
+    // opens anything. `--check` and everything above run beside it.
+    if !check {
+        one_copy::claim_or_exit("tuimail");
+    }
+
     // Everything that can fail does so before the terminal is taken over,
     // so errors print as normal text.
     let config = config::Config::load()?;

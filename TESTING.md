@@ -81,7 +81,9 @@ old release as a limit to report.
 3. Capture it first. If a composer is open, a draft is unsaved or a confirmation is
    asked, leave it and tell him; otherwise go on.
 4. `tmux respawn-pane -k -t <pane id> tuimail.exe ''` (the empty argument keeps tmux
-   from running it through a shell, as `windows.conf` starts it).
+   from running it through a shell, as `windows.conf` starts it). The new copy waits up
+   to 5 seconds for the old one's one-copy lock to go, so it isn't refused as a second
+   copy (FP-17).
 5. Read the pane back: it's alive, it runs the new version (`/` then `info`, then
    any key to close), and his accounts are checking. Send keys one per
    `tmux send-keys` call, from PowerShell (Git Bash turns a lone `/` into a path), and

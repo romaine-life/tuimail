@@ -124,6 +124,8 @@ The first start asks for an account: your address and password (for Gmail, iClou
 
 To look around first, `tuimail --demo` shows made-up accounts and mail, connecting nowhere and sending nothing.
 
+One tuimail runs at a time: a second started while one is open prints `tuimail is already open` and exits. `tuimail --check`, `--demo` and `tuimail mcp` run beside it.
+
 ### Check your setup
 
 ```sh
@@ -397,7 +399,7 @@ It holds `accounts.toml`, `settings.toml`, and `tuimail.db`: the cache of your f
 ```sh
 cargo test                       # offline tests
 cargo clippy --all-targets
-TM_DATA_DIR=$HOME/tm-test cargo run   # a separate data folder (a full path) for trying things
+TM_DATA_DIR=$HOME/tm-test ONE_COPY_SCOPE=tm-test cargo run   # a separate data folder (a full path) and lock for trying things
 cargo run -- --demo              # made-up accounts and mail, nothing connects or is sent
 ```
 
