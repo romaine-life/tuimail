@@ -796,16 +796,17 @@ pub mod tests {
     }
 
     /// Runs the test `name` in a process of its own, since the log and the
-    /// panic hook are the process's, and gives how it ended and its log.
+    /// panic hook are the process's, and gives how it ended and its log. The
+    /// child's folder goes once its log is read.
     pub fn log_of_child(name: &str) -> (std::process::Output, String) {
         let dir = folder();
         let run = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", name, "--nocapture", "--test-threads=1"])
             .env(CHILD, &dir)
-            .output()
-            .unwrap();
+            .output();
         let log = std::fs::read_to_string(dir.join(FILE)).unwrap_or_default();
-        (run, log)
+        let _ = std::fs::remove_dir_all(&dir);
+        (run.unwrap(), log)
     }
 
     pub fn assert_nothing_private_in(log: &str) {
