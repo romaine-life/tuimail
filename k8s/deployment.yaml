@@ -26,7 +26,7 @@ spec:
         # The volume comes world-writable, and the session keeps its store only in a folder of
         # its own (config::make_private_dir): this gives /state to the session's user, alone.
         - name: own-state
-          image: forgejo.romaine.life/romaine-life/tuimail:v0.2.5.23@sha256:4e2f281e294f0d00eb083448d2b391afca7e685a63e6bb8aeb7f6fd1249b2bac
+          image: forgejo.romaine.life/romaine-life/tuimail:v0.2.5.25@sha256:88464f2ed963812ddc13bb21390589753c79087299518baf22eeabec7e5cd6cd
           command: ["sh", "-c", "chown 65534:65534 /state && chmod 700 /state"]
           securityContext:
             runAsUser: 0
@@ -42,7 +42,7 @@ spec:
       containers:
         - name: session
           # Built, self-tested and pinned by pipeline-templates' release suite; no mutable tag.
-          image: forgejo.romaine.life/romaine-life/tuimail:v0.2.5.23@sha256:4e2f281e294f0d00eb083448d2b391afca7e685a63e6bb8aeb7f6fd1249b2bac
+          image: forgejo.romaine.life/romaine-life/tuimail:v0.2.5.25@sha256:88464f2ed963812ddc13bb21390589753c79087299518baf22eeabec7e5cd6cd
           args:
             - --listen
             - 0.0.0.0:8080
